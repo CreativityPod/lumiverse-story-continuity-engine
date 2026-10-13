@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Story Continuity — drawer preview</title>
+<style>
+:root{--lumiverse-bg:#191c23;--lumiverse-bg-elevated:#22262f;--lumiverse-border:#363c49;--lumiverse-text:#e5e8ee;--lumiverse-text-muted:#abb3c2;--lumiverse-primary:#7869c7;--lumiverse-success:#91bea2;--lumiverse-warning:#d8b57e}
+body{margin:0;background:#111319;color:var(--lumiverse-text);font:14px system-ui,sans-serif;display:grid;grid-template-columns:minmax(300px,1fr) 400px;height:100vh}
+aside{background:var(--lumiverse-bg);overflow:auto;padding:20px;box-sizing:border-box;border-left:1px solid var(--lumiverse-border)}main{padding:48px;max-width:650px}main h1{font-size:28px}main p{color:var(--lumiverse-text-muted);line-height:1.7}main button{padding:9px 12px;background:var(--lumiverse-bg-elevated);color:var(--lumiverse-text);border:1px solid var(--lumiverse-border);border-radius:8px;cursor:pointer}
+@media(max-width:650px){body{display:block;height:auto}main{padding:20px}aside{border:0}}
+</style>
+<main><h1>Story Continuity Engine</h1><p>Standalone drawer preview using the extension's actual frontend and themed fallback controls. The test fixture is a mechanic at a rainy railway station.</p><button id="theme">Toggle theme</button><p id="event">No model calls or changes to Lumiverse are made by this preview.</p></main><aside id="drawer"></aside>
+<script type="module">
+import { setup } from '../src/frontend.js';
+import { fixtureState } from './fixtures.js';
+import { publicTrackerSnapshot } from '../src/schemas.js';
+let receive;
+const state=fixtureState();
+const ctx={
+ components:{},ui:{registerDrawerTab(){return{root:document.querySelector('#drawer'),destroy(){},setBadge(){},activate(){},onActivate(){return()=>{}}}}},
+ dom:{addStyle(css){const el=document.createElement('style');el.textContent=css;document.head.append(el);return()=>el.remove()},cleanup(){}},
+ events:{on(){return()=>{}}},onBackendMessage(handler){receive=handler;return()=>{}},getActiveChat(){return{chatId:'preview'}},ready(){},uploads:{async pickFile(){return[]}},
+ sendToBackend(payload){document.querySelector('#event').textContent=payload.type;queueMicrotask(()=>{
+  if(payload.type==='story_get_status')receive({type:'story_status',chatId:'preview',config:{enabled:true,showStatusWidget:false,connectionId:'',outputMode:'auto',maxTokens:6144,timeoutMs:120000},code:'active',level:'green',text:'Story continuity is current.',revision:4,lastRevisionAt:'2026-10-13T16:00:00Z',snapshot:publicTrackerSnapshot(state),canImport:true,canExport:true,canBegin:false,privateStateIncluded:payload.includePrivate,...(payload.includePrivate?{privateState:state}:{})});
+  if(payload.type==='story_get_connections')receive({type:'story_connections',connections:[{id:'local',name:'Local tracker'}]});
+ })}
+};
+setup(ctx);
+let light=false;document.querySelector('#theme').onclick=()=>{light=!light;const values=light?['#f8f9fc','#fff','#d8dde7','#242935','#697387']:['#191c23','#22262f','#363c49','#e5e8ee','#abb3c2'];['--lumiverse-bg','--lumiverse-bg-elevated','--lumiverse-border','--lumiverse-text','--lumiverse-text-muted'].forEach((key,index)=>document.documentElement.style.setProperty(key,values[index]));document.body.style.background=light?'#edf0f5':'#111319'};
+</script>
+</html>

@@ -1,0 +1,359 @@
+import { validateState, publicTrackerSnapshot, remapStateSources } from "./schemas.js";
+import { CHAT_KEYS, IMPORT_LOADED_TEXT, cardSources, fingerprint, isSpecializedCard, contentToText,
+  transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
+  validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
+import { DEFAULT_CONFIG, normalizeConfig, runTracker } from "./tracker.js";
+
+export function createStoryEngine(api) {
+  const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map();
+  let registered = false;
+  const userKey = userId => userId || "default";
+  const safeToken = chatId => `${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 150)}-${fingerprint(String(chatId))}`;
+  const pathFor = chatId => `chats/${safeToken(chatId)}.json`;
+  const has = permission => api.permissions.has(permission);
+  const loadConfig = async () => normalizeConfig(await api.storage.getJson("config.json", { fallback: DEFAULT_CONFIG }));
+  const loadStore = async chatId => normalizeStore(await api.storage.getJson(pathFor(chatId), { fallback: createStore(chatId) }), chatId);
+  const saveStore = async store => { if (!deleted.has(store.chatId)) await api.storage.setJson(pathFor(store.chatId), store, { indent: 2 }); };
+  const send = (payload, userId) => api.sendToFrontend(payload, userId);
+  const required = ["generation", "interceptor", "chat_mutation", "characters", "chats"];
+  const selection = userId => selected.get(userKey(userId));
+  function adopt(chatId, userId) { const id = typeof chatId === "string" && chatId ? chatId : null; selected.set(userKey(userId), id); if (id) users.set(id, userId); return id; }
+  function requestChat(payload, userId) {
+    if (payload.chatId === null) { adopt(null, userId); return null; }
+    const current = selection(userId);
+    if (current === undefined && typeof payload.chatId === "string") return adopt(payload.chatId, userId);
+    return current && (!Object.hasOwn(payload, "chatId") || current === payload.chatId) ? current : null;
+  }
+  async function getSources(chatId, messages, userId) {
+    const chat = await api.chats.get(chatId, userId);
+    if (!chat) throw new Error("Chat not found");
+    const ids = [...new Set([chat.character_id, ...(Array.isArray(chat.metadata?.character_ids) ? chat.metadata.character_ids : [])].filter(id => typeof id === "string" && id))];
+    if (!ids.length) throw new Error("This chat has no character card");
+    if (ids.length > 24) throw new Error("At most 24 card characters can be initialized");
+    const cards = [];
+    for (const id of ids) { const card = await api.characters.get(id, userId); if (!card) throw new Error("A chat character card is unavailable"); cards.push(card); }
+    const lore = [];
+    // Only always-active, enabled attached lore is read at initialization. Conditional
+    // entries remain under the host's activation rules and are learned from narrative.
+    if (has("world_books") && api.world_books?.entries?.list) {
+      const books = [...new Set(cards.flatMap(card => card.world_book_ids ?? []))];
+      for (const book of books) {
+        let offset = 0;
+        do {
+          const page = await api.world_books.entries.list(book, { limit: 100, offset, userId });
+          const entries = page?.data ?? [];
+          for (const entry of entries) if (entry.constant === true && entry.disabled !== true) lore.push({ id: entry.id, content: entry.content });
+          offset += entries.length;
+          if (!entries.length || offset >= (page.total ?? offset)) break;
+          if (offset > 5000) throw new Error("Attached lore is too large to initialize safely");
+        } while (true);
+      }
+    }
+    return { chat, cards, sources: cardSources(cards, messages, lore) };
+  }
+  async function mirror(store) {
+    if (!has("chat_mutation") || deleted.has(store.chatId)) return;
+    for (const [key, value] of [[CHAT_KEYS.state, store.current && !store.blocked ? JSON.stringify(store.current) : ""],
+      [CHAT_KEYS.public, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current)) : ""]]) {
+      if (!api.variables.chat.get || await api.variables.chat.get(store.chatId, key) !== value) await api.variables.chat.set(store.chatId, key, value);
+    }
+  }
+  async function status(chatId, userId, includePrivate = false) {
+    const config = await loadConfig();
+    const store = chatId ? await loadStore(chatId) : null;
+    const missing = required.filter(permission => !has(permission));
+    const busy = chatId && processing.has(chatId);
+    const code = !chatId ? "idle" : missing.length ? "permissions" : !config.enabled ? "disabled" : store.blocked ? "specialized" : busy ? "processing" : store.lastError ? "degraded" : store.current ? "active" : "ready";
+    const text = { idle: "Open a character chat to begin.", permissions: `Grant required permissions: ${missing.join(", ")}.`, disabled: "Story continuity tracking is disabled.",
+      specialized: store?.blocked, processing: "Updating character and world continuity…", degraded: store?.lastError,
+      active: "Story continuity is current.", ready: "Ready to initialize from this character card." }[code];
+    const payload = { type: "story_status", chatId, config, code, text, processing: Boolean(busy), level: code === "active" ? "green" : "amber",
+      revision: store?.revision ?? 0, lastRevisionAt: store?.lastRevisionAt ?? "", cardChanged: Boolean(store?.pendingCardFingerprint),
+      snapshot: store && !store.blocked ? publicTrackerSnapshot(store.current) : null, canExport: Boolean(store?.initialSetup),
+      canBegin: Boolean(store?.canBegin && !busy && !generating.has(chatId)),
+      canImport: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.importable && !store?.blocked),
+      privateStateIncluded: includePrivate };
+    if (includePrivate && store && !store.blocked) payload.privateState = store.current;
+    return payload;
+  }
+  async function publish(chatId, userId, includePrivate = false) {
+    const payload = await status(chatId, userId, includePrivate);
+    if ((selection(userId) ?? null) === chatId) send(payload, userId);
+    return payload;
+  }
+  async function matches(chatId, messages, index) {
+    if (deleted.has(chatId)) return false;
+    const latest = await api.chat.getMessages(chatId);
+    return latest[index]?.id === messages[index]?.id && prefixFingerprint(latest, index) === prefixFingerprint(messages, index);
+  }
+  const commitRevision = store => { store.revision++; store.lastRevisionAt = new Date().toISOString(); };
+
+  async function reconcile(chatId, options = {}, userId = users.get(chatId)) {
+    if (!chatId || deleted.has(chatId)) return;
+    const config = await loadConfig();
+    if (!config.enabled || required.some(permission => !has(permission))) return publish(chatId, userId, options.includePrivate);
+    let store = await loadStore(chatId);
+    processing.add(chatId);
+    const deadline = Date.now() + 240000;
+    try {
+      const messages = await api.chat.getMessages(chatId);
+      const { cards, sources } = await getSources(chatId, messages, userId);
+      if (isSpecializedCard(cards, messages)) {
+        store.blocked = "This Date Simulator/Storyteller chat belongs to Date Simulator Continuity Engine.";
+        store.current = null; store.lastError = "";
+        await saveStore(store); await mirror(store); return;
+      }
+      store.blocked = "";
+      const context = transcriptContext(messages), turns = listEligibleTurns(messages, context);
+      const epoch = context.anchor ? `import:${context.anchor.id}` : `cards:${cards.map(card => card.id).join(",")}`;
+      const currentFingerprint = fingerprint(sources);
+      const openingChanged = !context.anchor && store.sources && store.sources.selectedOpening !== sources.selectedOpening;
+      if (store.epoch !== epoch || openingChanged || options.refreshCards) {
+        const revision = store.revision, lastRevisionAt = store.lastRevisionAt;
+        store = { ...createStore(chatId), revision, lastRevisionAt, epoch };
+      }
+      // A deleted import anchor must discard all imported state, including its baseline.
+      if (context.anchor && (!store.baseline || store.sourceFingerprint !== context.anchor.fingerprint)) {
+        store.sources = context.anchor.setup.sources;
+        store.sourceFingerprint = context.anchor.fingerprint;
+        store.baseline = remapStateSources(context.anchor.setup.initialState, new Map(), context.anchor.id);
+        store.initialSetup = { key: "", fingerprint: context.anchor.fingerprint, state: store.baseline };
+        store.checkpoints = {};
+      } else if (!context.anchor) {
+        if (store.sources && store.sourceFingerprint !== currentFingerprint) store.pendingCardFingerprint = currentFingerprint;
+        if (!store.sources || !store.baseline) { store.sources = sources; store.sourceFingerprint = currentFingerprint; store.pendingCardFingerprint = ""; }
+      }
+      store.importable = !context.anchor && !messages.some(message => message.role === "user");
+      store.canBegin = Boolean(context.anchor && !turns.length && !messages.some(message => message.role === "user" && /^\/story-begin\b/.test(contentToText(message.content))));
+      let prefix = validCheckpointPrefix(store, turns);
+      if (options.reprocess && prefix.count && prefix.count === turns.length) {
+        delete store.checkpoints[turns.at(-1).key];
+        prefix = validCheckpointPrefix(store, turns);
+      }
+      store.current = prefix.previousState;
+      store.checkpoints = prefix.checkpoints;
+      store.lastError = "";
+      await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
+      const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
+      if (!store.baseline) {
+        const baseline = await runTracker(api, { initialize: true, sources: store.sources, sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
+        // Initialization must still refer to the same cards and selected opening.
+        const freshMessages = await api.chat.getMessages(chatId);
+        const fresh = await getSources(chatId, freshMessages, userId);
+        if (fingerprint(fresh.sources) !== currentFingerprint || deleted.has(chatId)) throw new Error("Card or opening changed during initialization; retry on the selected state.");
+        store.baseline = baseline; store.current = baseline; commitRevision(store);
+        await saveStore(store); await mirror(store);
+      }
+      let previousState = prefix.previousState ?? store.baseline;
+      for (let index = prefix.count; index < turns.length; index++) {
+        const turn = turns[index];
+        const isOpening = !context.anchor && index === 0 && !turn.user && contentToText(turn.assistant.content) === store.sources.selectedOpening;
+        const state = isOpening ? previousState : await runTracker(api, { sources: store.sources, previousState,
+          userText: contentToText(turn.user?.content), assistantText: contentToText(turn.assistant.content),
+          sourceMessageId: String(turn.assistant.id), isOpening, remainingMs: remaining() }, config, userId);
+        if (!(await matches(chatId, messages, turn.index))) throw new Error("The selected branch changed during tracking; stale output was discarded.");
+        store.checkpoints[turn.key] = { fingerprint: turn.fingerprint, state, createdAt: new Date().toISOString() };
+        store.current = state; previousState = state; commitRevision(store);
+        if (!context.anchor && index === 0 && (!store.initialSetup || store.initialSetup.fingerprint !== turn.fingerprint)) store.initialSetup = { key: turn.key, fingerprint: turn.fingerprint, state: structuredClone(state) };
+        await saveStore(store); await mirror(store);
+      }
+      if (store.initialSetup?.key && !turns.some(turn => turn.key === store.initialSetup.key && turn.fingerprint === store.initialSetup.fingerprint)) store.initialSetup = null;
+      await saveStore(store);
+    } catch (error) {
+      store.lastError = String(error?.message ?? error).slice(0, 600);
+      await saveStore(store);
+      api.log.warn(`Story continuity update failed: ${store.lastError}`);
+    } finally { processing.delete(chatId); await publish(chatId, userId, options.includePrivate); }
+  }
+  function enqueue(chatId, operation) {
+    const next = (queues.get(chatId) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    queues.set(chatId, next);
+    next.finally(() => { if (queues.get(chatId) === next) queues.delete(chatId); }).catch(error => api.log.warn(String(error?.message ?? error)));
+    return next;
+  }
+  const schedule = (chatId, options = {}, userId) => { if (userId) users.set(chatId, userId); return enqueue(chatId, () => reconcile(chatId, options, userId ?? users.get(chatId))); };
+
+  async function intercept(messages, context) {
+    const config = await loadConfig(), chatId = context?.chatId;
+    if (!config.enabled || !chatId || deleted.has(chatId) || required.some(permission => !has(permission))) return messages;
+    if (isSpecializedCard([], messages)) return messages;
+    await schedule(chatId, {}, context.userId ?? users.get(chatId));
+    const store = await loadStore(chatId);
+    if (!store.current || store.blocked) return messages;
+    // Revalidate the currently selected prefix even when a tracker update failed.
+    const selectedMessages = await api.chat.getMessages(chatId);
+    const fresh = await getSources(chatId, selectedMessages, context.userId ?? users.get(chatId));
+    if (isSpecializedCard(fresh.cards, selectedMessages) || (!store.epoch.startsWith("import:") && store.sources.selectedOpening !== fresh.sources.selectedOpening)) return messages;
+    const selectedContext = transcriptContext(selectedMessages);
+    if ((selectedContext.anchor ? `import:${selectedContext.anchor.id}` : store.epoch.startsWith("import:") ? "removed-import" : store.epoch) !== store.epoch) return messages;
+    const prefix = validCheckpointPrefix(store, listEligibleTurns(selectedMessages, selectedContext));
+    return prefix.previousState ? injectContinuity(messages, prefix.previousState, store.lastError ? "using last valid checkpoint" : "active") : messages;
+  }
+  function register() { if (!registered && has("interceptor")) { api.registerInterceptor(intercept, 260); registered = true; } }
+
+  async function inheritFork(payload, userId) {
+    const { sourceChatId, forkedChatId, forkedAtMessageId, messageIdMap } = payload ?? {};
+    if (!sourceChatId || !forkedChatId || sourceChatId === forkedChatId || !messageIdMap || !messageIdMap[forkedAtMessageId]) return false;
+    const map = new Map(Object.entries(messageIdMap));
+    if (new Set(map.values()).size !== map.size) return false;
+    const source = await loadStore(sourceChatId), existing = await loadStore(forkedChatId);
+    if (!source.baseline || existing.baseline) return false;
+    const messages = await api.chat.getMessages(forkedChatId);
+    const reverse = new Map([...map].map(([from, to]) => [to, from]));
+    if (messages.length !== map.size || messages.some(message => !reverse.has(String(message.id)))) return false;
+    const sourcePrefix = messages.map(message => ({ ...message, id: reverse.get(String(message.id)) }));
+    const sourceContext = transcriptContext(sourcePrefix), context = transcriptContext(messages);
+    const originalTurns = listEligibleTurns(sourcePrefix, sourceContext), turns = listEligibleTurns(messages, context);
+    const prefix = validCheckpointPrefix(source, originalTurns);
+    const next = createStore(forkedChatId);
+    next.sources = source.sources;
+    next.epoch = source.epoch.startsWith("import:") ? `import:${map.get(source.epoch.slice(7))}` : source.epoch;
+    if (next.epoch === "import:undefined") return false;
+    next.sourceFingerprint = context.anchor?.fingerprint ?? source.sourceFingerprint;
+    next.baseline = remapStateSources(source.baseline, map); next.current = next.baseline;
+    for (let index = 0; index < prefix.count; index++) {
+      const turn = turns[index], inherited = prefix.checkpoints[originalTurns[index].key];
+      if (map.get(String(originalTurns[index].assistant.id)) !== String(turn.assistant.id)) break;
+      const state = remapStateSources(inherited.state, map);
+      next.checkpoints[turn.key] = { ...inherited, fingerprint: turn.fingerprint, state };
+      next.current = state; commitRevision(next);
+    }
+    const initial = source.initialSetup;
+    if (initial?.key) {
+      const old = originalTurns.findIndex(turn => turn.key === initial.key && turn.fingerprint === initial.fingerprint);
+      if (old >= 0 && next.checkpoints[turns[old].key]) next.initialSetup = { key: turns[old].key, fingerprint: turns[old].fingerprint, state: remapStateSources(initial.state, map) };
+    } else if (context.anchor) next.initialSetup = { key: "", fingerprint: context.anchor.fingerprint, state: next.baseline };
+    await saveStore(next); await mirror(next); users.set(forkedChatId, userId);
+    return true;
+  }
+
+  async function scanUnusedStores(userId) {
+    const entries = await api.storage.list("chats");
+    const candidates = [];
+    for (const entry of entries) {
+      if (typeof entry !== "string" || !/^[a-zA-Z0-9_-]+\.json$/.test(entry)) continue;
+      try {
+        const value = JSON.parse(await api.storage.read(`chats/${entry}`));
+        if (value.schemaVersion !== 1 || !value.chatId || pathFor(value.chatId) !== `chats/${entry}` || processing.has(value.chatId) || queues.has(value.chatId)) continue;
+        if (!value.current && !value.baseline && !Object.keys(value.checkpoints ?? {}).length && !value.revision) candidates.push(`chats/${entry}`);
+        else if (has("chats") && await api.chats.get(value.chatId, userId) === null) candidates.push(`chats/${entry}`);
+      } catch { /* retain any file whose ownership or orphan status cannot be proved */ }
+    }
+    return candidates;
+  }
+
+  async function handleFrontend(payload, userId) {
+    const type = payload?.type;
+    if (!type?.startsWith("story_")) return;
+    if (type === "story_get_connections") {
+      try { send({ type: "story_connections", connections: has("generation") ? await api.connections.list(userId) : [], error: has("generation") ? "" : "Generation permission is required." }, userId); }
+      catch (error) { send({ type: "story_connections", connections: [], error: error.message }, userId); }
+      return;
+    }
+    if (type === "story_save_config" || type === "story_set_widget_visibility") {
+      const config = normalizeConfig(type === "story_save_config" ? payload.config : { ...await loadConfig(), showStatusWidget: payload.showStatusWidget });
+      await api.storage.setJson("config.json", config, { indent: 2 });
+      send({ type: "story_config_saved", config }, userId);
+      const chatId = requestChat(payload, userId);
+      if (chatId) await schedule(chatId, {}, userId); else await publish(null, userId);
+      return;
+    }
+    if (type === "story_scan_cleanup" || type === "story_cleanup_unused") {
+      try {
+        const candidates = await scanUnusedStores(userId), key = userKey(userId);
+        if (type === "story_scan_cleanup") {
+          const token = crypto.randomUUID(); cleanupTokens.set(key, { token, expires: Date.now() + 120000, paths: candidates });
+          send({ type: "story_cleanup_scan", count: candidates.length, token, message: candidates.length ? `Found ${candidates.length} unused tracking files. Click Delete to confirm.` : "No unused tracking files found." }, userId);
+        } else {
+          const confirmation = cleanupTokens.get(key); cleanupTokens.delete(key);
+          if (!confirmation || confirmation.token !== payload.token || confirmation.expires < Date.now()) throw new Error("Cleanup confirmation expired; scan again.");
+          let removed = 0;
+          for (const path of candidates.filter(path => confirmation.paths.includes(path))) {
+            const value = JSON.parse(await api.storage.read(path));
+            await enqueue(value.chatId, async () => {
+              const fresh = JSON.parse(await api.storage.read(path));
+              if (fresh.chatId !== value.chatId || pathFor(fresh.chatId) !== path || processing.has(fresh.chatId)) return;
+              const inert = !fresh.current && !fresh.baseline && !Object.keys(fresh.checkpoints ?? {}).length && !fresh.revision;
+              if (inert || has("chats") && await api.chats.get(fresh.chatId, userId) === null) { await api.storage.delete(path); removed++; }
+            });
+          }
+          send({ type: "story_action_result", ok: true, message: `Deleted ${removed} unused tracking files.` }, userId);
+        }
+      } catch (error) { send({ type: "story_action_result", ok: false, message: error.message }, userId); }
+      return;
+    }
+    const chatId = requestChat(payload, userId);
+    if (type === "story_get_status") {
+      await publish(chatId, userId, Boolean(payload.includePrivate));
+      if (chatId) await schedule(chatId, { includePrivate: Boolean(payload.includePrivate) }, userId);
+      return;
+    }
+    if (!chatId) { send({ type: "story_action_result", ok: false, requestId: payload.requestId, chatId: null, message: "Open the intended character chat first." }, userId); return; }
+    try {
+      if (type === "story_reprocess" || type === "story_refresh_cards") {
+        await schedule(chatId, { reprocess: type === "story_reprocess", refreshCards: type === "story_refresh_cards", includePrivate: payload.includePrivate }, userId);
+        const store = await loadStore(chatId);
+        if (store.lastError || store.blocked) throw new Error(store.lastError || store.blocked);
+        send({ type: "story_action_result", chatId, ok: true, message: type === "story_reprocess" ? "Latest turn reprocessed." : "Card profiles refreshed and selected history reconciled." }, userId);
+      } else if (type === "story_export_setup") {
+        await enqueue(chatId, async () => {
+          const messages = await api.chat.getMessages(chatId), store = await loadStore(chatId);
+          if (store.blocked) throw new Error(store.blocked);
+          const context = transcriptContext(messages);
+          const setup = exportInitialSetup(store, listEligibleTurns(messages, context), context);
+          if (selection(userId) !== chatId) throw new Error("Chat changed while exporting.");
+          send({ type: "story_setup_result", chatId, requestId: payload.requestId, ok: true, fileText: JSON.stringify(setup, null, 2), message: "Original starting state ready to save." }, userId);
+        });
+      } else if (type === "story_import_setup") {
+        const setup = validateSetupFile(payload.fileText);
+        await enqueue(chatId, async () => {
+          const config = await loadConfig(), store = await loadStore(chatId);
+          if (!config.enabled || required.some(permission => !has(permission))) throw new Error("Enable tracking and grant the required permissions before importing.");
+          const messages = await api.chat.getMessages(chatId), prefix = fingerprint(messages);
+          const { cards } = await getSources(chatId, messages, userId);
+          if (isSpecializedCard(cards, messages) || isSpecializedCard(setup.sources.cards)) throw new Error("Use Date Simulator Continuity Engine for specialized setups.");
+          if (messages.some(message => message.role === "user" || message.metadata?.story_continuity_setup) || generating.has(chatId)) throw new Error("Import requires a fresh chat with no user turns or response in progress.");
+          if (selection(userId) !== chatId || fingerprint(await api.chat.getMessages(chatId)) !== prefix) throw new Error("Selected chat changed during import.");
+          await api.chat.appendMessage(chatId, { role: "assistant", content: IMPORT_LOADED_TEXT, metadata: { story_continuity_setup: setup } });
+          // The appended anchor is authority; reconstruction remains possible after sidecar loss.
+          store.current = null; await saveStore(store);
+        });
+        await schedule(chatId, {}, userId);
+        send({ type: "story_setup_result", chatId, requestId: payload.requestId, ok: true, message: "Setup loaded. Select Begin Story." }, userId);
+      } else if (type === "story_begin") {
+        if (beginning.has(chatId) || required.some(permission => !has(permission)) || !(await loadConfig()).enabled) throw new Error("Begin Story is unavailable while another begin is running or required tracking permissions are missing.");
+        const messages = await api.chat.getMessages(chatId), context = transcriptContext(messages);
+        if (!context.anchor || listEligibleTurns(messages, context).length || generating.has(chatId)) throw new Error("Begin Story requires a loaded setup before play starts.");
+        if (messages.some(message => message.role === "user" && /^\/story-begin\b/.test(contentToText(message.content)))) throw new Error("The starting scene has already been presented.");
+        // Begin invokes generation outside our queue; its interceptor can safely reconcile.
+        beginning.add(chatId);
+        try { await api.chat.appendMessage(chatId, { role: "user", content: "/story-begin\nPresent the current observable starting scene from saved continuity. Do not advance time, recast characters, or reveal private information.", metadata: { story_continuity_observation: true } }, { generate: true }); }
+        finally { beginning.delete(chatId); }
+      }
+    } catch (error) { send({ type: type.includes("setup") ? "story_setup_result" : "story_action_result", chatId, requestId: payload.requestId, ok: false, message: String(error?.message ?? error) }, userId); }
+  }
+
+  register();
+  api.onFrontendMessage(handleFrontend);
+  api.on("CHAT_SWITCHED", (payload, userId) => { const chatId = adopt(payload?.chatId, userId); return chatId ? schedule(chatId, {}, userId) : publish(null, userId); });
+  for (const name of ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) api.on(name, (payload, userId) => payload?.chatId ? schedule(payload.chatId, {}, userId) : undefined);
+  for (const name of ["GENERATION_STARTED", "GENERATION_ENDED", "GENERATION_STOPPED"]) api.on(name, payload => {
+    if (!payload?.chatId) return;
+    if (name === "GENERATION_STARTED") generating.add(payload.chatId); else generating.delete(payload.chatId);
+  });
+  api.on("CHAT_FORKED", (payload, userId) => {
+    if (!payload?.forkedChatId) return;
+    const sourcePending = queues.get(payload.sourceChatId) ?? Promise.resolve();
+    return enqueue(payload.forkedChatId, async () => { await sourcePending.catch(() => undefined); await inheritFork(payload, userId); await reconcile(payload.forkedChatId, {}, userId); });
+  });
+  api.on("CHAT_DELETED", payload => {
+    const chatId = payload?.id ?? payload?.chatId;
+    if (!chatId) return;
+    deleted.add(chatId);
+    return enqueue(chatId, () => api.storage.delete(pathFor(chatId)));
+  });
+  api.permissions.onChanged(({ permission, granted }) => { if (permission === "interceptor" && granted) register(); });
+  return { handleFrontend, schedule, reconcile, intercept, status, loadStore, pathFor, inheritFork, scanUnusedStores };
+}
+
+if (typeof spindle !== "undefined") createStoryEngine(spindle);
