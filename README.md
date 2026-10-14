@@ -1,12 +1,12 @@
 # Story Continuity Engine
 
-Persistent character and world state for any character card. Version **1.3.0** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
+Persistent character and world state for any character card. Version **1.4.0** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
 
 ## Install
 
-1. Extract `release/Story_Continuity_Engine_v1.3.0.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
+1. Extract `release/Story_Continuity_Engine_v1.4.0.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
 2. Grant **generation**, **interceptor**, **chat_mutation**, **characters**, and **chats**. These support quiet tracker calls, prompt injection, chat-variable mirrors, and card/chat reads. Grant **world_books** to include enabled constant entries from attached lorebooks and **ui_panels** for the floating widget. This extension does not modify character cards or lorebooks.
-3. Open an ordinary character chat, then open **Story Continuity** in the Spindle drawer. Initialization is automatic. A new chat is recommended for the first run.
+3. Open an ordinary character chat. Choose **Import Saved Setup** or **Create From Character Card** in the startup message, or use the matching controls in the **Story Continuity** drawer. A new chat is recommended for the first run.
 4. Optionally select a tracker connection and structured-output mode, then select **Save Settings**. Without a selection, the host's default connection is used.
 
 Built entries are included; installation does not require npm or the development dependencies. The implementation targets the local Lumiverse 1.1.6 APIs. A public repository has not been created or published.
@@ -17,7 +17,9 @@ The engine reads each card in the chat or group: name, description, personality,
 
 A quiet LLM call extracts a structured baseline. Complete bounded card source text is saved alongside the extracted state. The original card remains the host's characterization source. The engine separates stable profiles and appearance from current visible and internal state, keeps recurring identities persistent, and leaves missing facts as `Unknown`.
 
-Before the first extraction call, a **Story Continuity Engine** system message appears near the beginning of the chat: “Generating the initial character profiles and starting story state… Please wait.” The same message updates to “Initial profiles and story state are ready.” when initialization completes, or a generic failure notice directing you to the drawer. It never displays profiles, secrets or raw error details. Retries reuse the existing notice, and ordinary turn updates do not post additional messages. Previously initialized chats and imported setups do not get a new generation notice solely from upgrading or loading saved state.
+An uninitialized chat first displays a **Story Continuity Engine** system message asking how to initialize the story, with two buttons: **Import Saved Setup** and **Create From Character Card**. The engine waits for this choice before making an extraction call. Import opens the JSON picker and restores existing profiles/state locally; canceling leaves both choices available. Create extracts new profiles and starting state from the card and selected greeting. The drawer offers the same actions if the opening message is scrolled out of view or inline controls are unavailable. Import remains limited to chats with no user turns and no already-loaded setup; an uninitialized chat with existing user turns can still choose Create to track its history.
+
+After choosing Create, the same message says “Generating the initial character profiles and starting story state… Please wait.” It updates to “Initial profiles and story state are ready.” on success, including successful import, or a generic failure notice directing you to the drawer. Inline choices retire once state is ready. It never displays profiles, secrets or raw error details. Retries reuse the notice, and ordinary turn updates do not post additional messages. Previously initialized chats resume without a new choice or extraction solely from upgrading. Waiting for setup persists across reopens and worker restarts; sending a normal turn does not silently choose creation.
 
 The notice stays visible to the user but is excluded from story tracking, branch fingerprints and outgoing roleplay prompts. The engine also sets Lumiverse's hidden-from-recall flag where supported to exclude the row from memory embeddings; that flag alone does not remove linear prompt history, so the interceptor filters it separately. Deleting the notice does not invalidate saved continuity or make the engine repost it during routine updates. Notice write errors do not prevent tracking.
 
@@ -50,12 +52,13 @@ The user retains control over voluntary actions and internal state. User interna
 The drawer uses Lumiverse native switches, selects, numeric inputs, checkbox, and badge when available; older hosts get themed HTML controls. Advanced and private sections use persistent details elements so mounted controls survive collapsing.
 
 - **Tracking enabled**, **Show Widget**, tracker connection, output mode, output budget, timeout, **Save Settings**, and **Refresh Connections**.
+- Startup **Import Saved Setup** / **Create From Character Card** choices in the opening system message, with matching drawer actions. While a file picker or setup request is pending, both actions are disabled to avoid duplicate choices.
 - An observable snapshot of the world, characters/NPCs, public relationships, and recurring places.
 - **Show Private Tracker State** explicitly reveals full state including profiles, secrets, knowledge, intentions, and objectives.
 - **Reprocess Latest Turn** reruns the latest eligible turn against its preceding checkpoint.
 - **Refresh Card Profiles** rebuilds a native baseline from the edited card and reconciles selected history. For an imported setup, it fills missing stable profile fields from that setup's saved sources while preserving its recorded scene and existing facts. Card edits are flagged before this action; opening edits/swipes rebuild native baselines automatically.
 - **Clean Unused Tracking Files** scans only this extension's files, requires a second click to delete, and verifies candidates again. Malformed or unprovable files are retained.
-- A draggable, edge-snapping floating icon opens the drawer, shows updating/attention states, and respects reduced-motion preferences. Missing UI panels permission does not prevent tracking.
+- When **Show Widget** is enabled, the draggable, edge-snapping floating icon appears in an eligible chat as soon as its settings are available, including before a snapshot exists. It opens the drawer and reflects waiting for setup, generation, readiness or attention. It follows chat navigation, disappears on Home, respects reduced-motion preferences, and defers specialized cards to Date Simulator. Missing UI panels permission does not prevent tracking.
 
 “Private” means omitted from ordinary replies and the default snapshot. The model receives private state, the user can inspect it, and Lumiverse's prompt inspection can show the injected block. It is not encryption. The tracker is instructed to classify private facts correctly, but extraction accuracy still depends on the selected model.
 
@@ -65,7 +68,7 @@ The drawer uses Lumiverse native switches, selects, numeric inputs, checkbox, an
 
 The secure-browser Save As API is used when available. Otherwise, **Download JSON File** appears. Canceling Save As writes nothing. Switching chats invalidates a pending export.
 
-**Import Setup — Choose File** accepts this extension's JSON format in a fresh generic chat with no user turns or generation in progress. A greeting that was already initialized does not prevent import. Import validates the file before appending one neutral confirmation with private metadata. The metadata anchor can restore state after sidecar loss or a fork. **Begin Story** generates an observable opening without a tracker call or fictional-clock advance. Editing, swiping away, or deleting the import anchor deactivates its state. Use a matching card for a reusable setup so its voice remains consistent.
+**Import Saved Setup** in the startup message and **Import Setup — Choose File** in the drawer use the same picker and accept this extension's JSON format in a fresh generic chat with no user turns or generation in progress. No unused extraction call is needed before importing. An already-created greeting baseline does not prevent a later import while the chat is still fresh. Import validates the file before appending one neutral confirmation with private metadata. The metadata anchor can restore state after sidecar loss or a fork. **Begin Story** generates an observable opening through the host's normal generation API without a tracker call or fictional-clock advance. Editing, swiping away, or deleting the import anchor deactivates its state. Use a matching card for a reusable setup so its voice remains consistent.
 
 ## Compatibility and limits
 
@@ -89,4 +92,4 @@ npm run package
 
 `npm run check` builds both entries, runs schema/alias/state/context/tracker/backend/DOM tests, and validates the package. Tests cover initialization notices and event-loop suppression, failed initialization/retry, prompt exclusion, notice deletion and restart recovery, GUID-free model context, identity round trips, backend ID allocation, alias typos and repair, cross-reference validation, all provider modes, routine payload reduction, targeted lookup, relevance selection and budgets, omitted-entity preservation, v1 migration, malformed output, privacy projection, user control, edits/swipes, stale results, forks, metadata import recovery, frozen exports, Home navigation, cleanup confirmation, and native/fallback drawer controls.
 
-For a standalone visual preview, serve this directory locally and open `test/browser-preview.html`. It uses the actual frontend with fixture data and does not access Lumiverse or make model calls. The drawer has been inspected in dark and light themes. Live provider behavior and an installed Lumiverse session still require an integration run.
+For a standalone visual preview, serve this directory locally and open `test/browser-preview.html`. It uses the actual frontend with fixture data and simulated setup transitions, including an import-picker cancellation. It does not access Lumiverse or make model calls. Startup controls, the pre-generation widget and the drawer have been inspected in dark and light themes. Live provider behavior and an installed Lumiverse session still require an integration run.

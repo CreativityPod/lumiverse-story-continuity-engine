@@ -64,15 +64,17 @@ export function createStoryEngine(api) {
     const store = chatId ? await loadStore(chatId) : null;
     const missing = required.filter(permission => !has(permission));
     const busy = chatId && processing.has(chatId);
-    const code = !chatId ? "idle" : missing.length ? "permissions" : !config.enabled ? "disabled" : store.blocked ? "specialized" : busy ? "processing" : store.lastError ? "degraded" : store.current ? "active" : "ready";
+    const code = !chatId ? "idle" : missing.length ? "permissions" : !config.enabled ? "disabled" : store.blocked ? "specialized" : busy ? "processing" : store.lastError ? "degraded" : store.awaitingSetup ? "setup" : store.current ? "active" : "ready";
     const text = { idle: "Open a character chat to begin.", permissions: `Grant required permissions: ${missing.join(", ")}.`, disabled: "Story continuity tracking is disabled.",
       specialized: store?.blocked, processing: "Updating character and world continuity…", degraded: store?.lastError,
-      active: "Story continuity is current.", ready: "Ready to initialize from this character card." }[code];
+      setup: "Choose Import Saved Setup or Create From Character Card.", active: "Story continuity is current.", ready: "Checking story setup…" }[code];
     const payload = { type: "story_status", chatId, config, code, text, processing: Boolean(busy), level: code === "active" ? "green" : "amber",
       revision: store?.revision ?? 0, lastRevisionAt: store?.lastRevisionAt ?? "", cardChanged: Boolean(store?.pendingCardFingerprint),
       snapshot: store && !store.blocked ? publicTrackerSnapshot(store.current) : null, canExport: Boolean(store?.initialSetup),
       canBegin: Boolean(store?.canBegin && !busy && !generating.has(chatId)),
       canImport: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.importable && !store?.blocked),
+      canCreate: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.sources && !store.baseline && !store.blocked && !store.epoch.startsWith("import:")),
+      awaitingSetup: Boolean(store?.awaitingSetup), setupNoticeId: store?.setupNoticeId ?? null,
       privateStateIncluded: includePrivate };
     if (includePrivate && store && !store.blocked) payload.privateState = store.current;
     return payload;
@@ -138,6 +140,8 @@ export function createStoryEngine(api) {
       const messages = await api.chat.getMessages(chatId);
       rememberNotices(chatId, messages);
       initializationNotice = messages.find(isInitializationNotice) ?? null;
+      if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; }
+      else store.setupNoticeId = null;
       finishNotice = initializationNotice?.metadata?.story_continuity_notice?.status === "generating";
       const { cards, sources } = await getSources(chatId, messages, userId);
       if (isSpecializedCard(cards, messages)) {
@@ -152,8 +156,8 @@ export function createStoryEngine(api) {
       const currentFingerprint = fingerprint(sources);
       const openingChanged = !context.anchor && store.sources && store.sources.selectedOpening !== sources.selectedOpening;
       if (store.epoch !== epoch || openingChanged || options.refreshCards && !context.anchor) {
-        const revision = store.revision, lastRevisionAt = store.lastRevisionAt;
-        store = { ...createStore(chatId), revision, lastRevisionAt, epoch };
+        const { revision, lastRevisionAt, initializationMode, setupNoticeId, setupNoticeShown } = store;
+        store = { ...createStore(chatId), revision, lastRevisionAt, epoch, initializationMode, setupNoticeId, setupNoticeShown };
       }
       // A deleted import anchor must discard all imported state, including its baseline.
       if (context.anchor && (!store.baseline || store.sourceFingerprint !== context.anchor.fingerprint)) {
@@ -183,6 +187,16 @@ export function createStoryEngine(api) {
       }
       store.importable = !context.anchor && !messages.some(message => message.role === "user");
       store.canBegin = Boolean(context.anchor && !turns.length && !messages.some(message => message.role === "user" && /^\/story-begin\b/.test(contentToText(message.content))));
+      if (store.baseline && initializationNotice?.metadata?.story_continuity_notice?.status === "choice") finishNotice = true;
+      if (!store.baseline && store.initializationMode !== "create") {
+        finishNotice = false;
+        store.awaitingSetup = true; store.current = null;
+        initializationNotice = await writeInitializationNotice(chatId, initializationNotice, "choice", !store.setupNoticeShown);
+        if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; }
+        await saveStore(store); await mirror(store);
+        return;
+      }
+      store.awaitingSetup = false;
       let prefix = validCheckpointPrefix(store, turns);
       if (options.reprocess && prefix.count && prefix.count === turns.length) {
         delete store.checkpoints[turns.at(-1).key];
@@ -194,7 +208,8 @@ export function createStoryEngine(api) {
       await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
-        initializationNotice = await writeInitializationNotice(chatId, initializationNotice, "generating", store.revision === 0);
+        initializationNotice = await writeInitializationNotice(chatId, initializationNotice, "generating", !store.setupNoticeShown);
+        if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; await saveStore(store); }
         finishNotice = Boolean(initializationNotice);
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
@@ -366,7 +381,22 @@ export function createStoryEngine(api) {
     }
     if (!chatId) { send({ type: "story_action_result", ok: false, requestId: payload.requestId, chatId: null, message: "Open the intended character chat first." }, userId); return; }
     try {
-      if (type === "story_reprocess" || type === "story_refresh_cards") {
+      if (type === "story_create_setup") {
+        await enqueue(chatId, async () => {
+          const config = await loadConfig(), store = await loadStore(chatId);
+          if (!config.enabled || required.some(permission => !has(permission))) throw new Error("Enable tracking and grant the required permissions before creating a setup.");
+          const messages = await api.chat.getMessages(chatId), { cards } = await getSources(chatId, messages, userId);
+          if (isSpecializedCard(cards, messages)) throw new Error("Use Date Simulator Continuity Engine for this card.");
+          if (transcriptContext(messages).anchor) throw new Error("A saved setup is already loaded.");
+          if (selection(userId) !== chatId || generating.has(chatId)) throw new Error("Open the intended chat and wait for the current response to finish.");
+          store.initializationMode = "create"; store.awaitingSetup = false; store.lastError = "";
+          await saveStore(store);
+        });
+        await schedule(chatId, {}, userId);
+        const store = await loadStore(chatId);
+        if (store.lastError || !store.current) throw new Error(store.lastError || "The initial story state could not be created.");
+        send({ type: "story_setup_result", chatId, requestId: payload.requestId, ok: true, message: "Initial profiles and story state are ready." }, userId);
+      } else if (type === "story_reprocess" || type === "story_refresh_cards") {
         await schedule(chatId, { reprocess: type === "story_reprocess", refreshCards: type === "story_refresh_cards", includePrivate: payload.includePrivate }, userId);
         const store = await loadStore(chatId);
         if (store.lastError || store.blocked) throw new Error(store.lastError || store.blocked);
@@ -385,6 +415,7 @@ export function createStoryEngine(api) {
         await enqueue(chatId, async () => {
           const config = await loadConfig(), store = await loadStore(chatId);
           if (!config.enabled || required.some(permission => !has(permission))) throw new Error("Enable tracking and grant the required permissions before importing.");
+          if (store.initializationMode === "create" && !store.baseline && !store.lastError) throw new Error("Setup creation is in progress; wait for it to finish before importing.");
           const messages = await api.chat.getMessages(chatId), prefix = fingerprint(messages);
           const { cards } = await getSources(chatId, messages, userId);
           if (isSpecializedCard(cards, messages) || isSpecializedCard(setup.sources.cards)) throw new Error("Use Date Simulator Continuity Engine for specialized setups.");
@@ -403,7 +434,7 @@ export function createStoryEngine(api) {
         if (messages.some(message => message.role === "user" && /^\/story-begin\b/.test(contentToText(message.content)))) throw new Error("The starting scene has already been presented.");
         // Begin invokes generation outside our queue; its interceptor can safely reconcile.
         beginning.add(chatId);
-        try { await api.chat.appendMessage(chatId, { role: "user", content: "/story-begin\nPresent the current observable starting scene from saved continuity. Do not advance time, recast characters, or reveal private information.", metadata: { story_continuity_observation: true } }, { generate: true }); }
+        try { await api.chat.appendMessage(chatId, { role: "user", content: "/story-begin\nPresent the current observable starting scene from saved continuity. Do not advance time, recast characters, or reveal private information.", metadata: { story_continuity_observation: true } }, { triggerGeneration: true }); }
         finally { beginning.delete(chatId); }
       }
     } catch (error) { send({ type: type.includes("setup") ? "story_setup_result" : "story_action_result", chatId, requestId: payload.requestId, ok: false, message: String(error?.message ?? error) }, userId); }

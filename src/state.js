@@ -7,6 +7,7 @@ export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", leg
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
 export const INITIALIZATION_NOTICE_TEXT = Object.freeze({
+  choice: "**Story Continuity Engine**\n\nHow would you like to initialize this story? Choose Import Saved Setup or Create From Character Card below, or open the Story Continuity drawer.",
   generating: "**Story Continuity Engine**\n\nGenerating the initial character profiles and starting story state… Please wait.",
   ready: "**Story Continuity Engine**\n\nInitial profiles and story state are ready.",
   failed: "**Story Continuity Engine**\n\nInitialization failed. Open Story Continuity for details and retry.",
@@ -100,13 +101,15 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
-    initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", blocked: "" };
+    initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", blocked: "",
+    initializationMode: "", awaitingSetup: false, setupNoticeId: null, setupNoticeShown: false };
 }
 
 export function normalizeStore(value, chatId) {
   const empty = createStore(chatId);
   if (!value || value.schemaVersion !== 1 || value.chatId !== chatId) return empty;
   const next = { ...empty, ...value, processing: false };
+  next.initializationMode = value.initializationMode === "create" || value.baseline || value.revision > 0 ? "create" : "";
   next.checkpoints = value.checkpoints && typeof value.checkpoints === "object" && !Array.isArray(value.checkpoints) ? value.checkpoints : {};
   try {
     for (const key of ["baseline", "current"]) if (next[key]) next[key] = validateState(next[key]);

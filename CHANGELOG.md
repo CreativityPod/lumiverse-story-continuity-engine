@@ -1,3 +1,12 @@
+# 1.4.0
+
+- New startup message offers Import Saved Setup and Create From Character Card. The engine waits for the user's choice before extraction; canceling import preserves the choices.
+- Shared inline/drawer handlers retain direct file-picker activation, prevent duplicate actions and ignore results after navigation. Completed setup retires the inline buttons.
+- Import restores the saved setup without an unused initial tracker call. Existing initialized chats resume without another choice; pending choices survive reopens and worker restarts.
+- Enabled floating widget appears before the first snapshot, reflects setup/generation/readiness, follows active-chat navigation and remains hidden on Home or specialized-card chats.
+- Begin Story uses Lumiverse's supported triggerGeneration append option.
+- Canonical schema and portable format remain compatible; optional startup fields extend the existing storage envelope.
+
 # 1.3.0
 
 - First-time initialization posts a single system notice before generating initial character profiles and story state, then updates that message to ready or failed.
