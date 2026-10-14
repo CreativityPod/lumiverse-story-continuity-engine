@@ -3,7 +3,7 @@ import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
 import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT } from "../src/state.js";
 import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
-import { CARD, SOURCES, fixtureState, outputState } from "./fixtures.js";
+import { CARD, SOURCES, fixtureState, modelOutput } from "./fixtures.js";
 
 function harness() {
   const files = new Map(), variables = new Map(), events = new Map(), sent = [], requests = [];
@@ -22,7 +22,7 @@ function harness() {
       appendMessage: async (id, message, options) => { const entry = { ...message, id: `appended-${messages.get(id).length}`, swipe_id: 0 }; messages.get(id).push(entry);
         if (options?.generate) messages.get(id).push({ id: "begin-response", role: "assistant", content: "Ada waits at the station." }); return { id: entry.id }; } },
     connections: { list: async () => [{ id: "default", provider: "openai", is_default: true }], get: async () => null },
-    generate: { quiet: async input => { requests.push(input); if (response) return response(input); const state = outputState();
+    generate: { quiet: async input => { requests.push(input); if (response) return response(input); const state = modelOutput(undefined, { initialize: input.messages[1].content.startsWith("INITIALIZE") });
       if (input.messages[1].content.includes("Coat removed")) state.characters[0].visible.dressAndLayers = "White shirt; blue coat on bench";
       if (input.messages[1].content.includes("Door opened")) state.places[0].currentState = "Side door open";
       return { content: JSON.stringify(state) }; } },
@@ -71,7 +71,7 @@ test("failed tracker retains only the last valid branch prefix and injection rem
 });
 test("stale tracker output is discarded when the selected turn changes during generation", async () => {
   const h = harness(); await h.select(); h.addTurn("Coat removed.");
-  h.setResponse(async () => { h.messages.get("chat").at(-1).content = "New swipe during tracking"; return { content: JSON.stringify(outputState()) }; });
+  h.setResponse(async () => { h.messages.get("chat").at(-1).content = "New swipe during tracking"; return { content: JSON.stringify(modelOutput()) }; });
   await h.engine.schedule("chat", {}, "owner"); const store = await h.engine.loadStore("chat");
   assert.match(store.lastError, /branch changed/); assert.ok(!store.checkpoints["a1::0"]);
 });
@@ -159,7 +159,7 @@ test("explicit imported-profile refresh fills missing stable fields without alte
   const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: initial };
   await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup), requestId: "import" }, "owner");
   h.setResponse(async () => {
-    const proposed = outputState(); proposed.characters[0].profile.boundaries = "Keep the private locker closed"; proposed.characters[0].profile.relationshipContext = "Former colleague of the stationmaster";
+    const proposed = modelOutput(); proposed.characters[0].profile.boundaries = "Keep the private locker closed"; proposed.characters[0].profile.relationshipContext = "Former colleague of the stationmaster";
     proposed.characters[0].visible.dressAndLayers = "Invented replacement outfit"; proposed.world.time = "Changed time";
     return { content: JSON.stringify(proposed) };
   });
@@ -168,4 +168,28 @@ test("explicit imported-profile refresh fills missing stable fields without alte
   assert.equal(store.current.characters[0].profile.boundaries, "Keep the private locker closed"); assert.equal(store.current.characters[0].profile.relationshipContext, "Former colleague of the stationmaster");
   assert.equal(store.current.characters[0].visible.dressAndLayers, "Blue coat"); assert.equal(store.current.world.time, "Midnight");
   assert.ok(h.requests.at(-1).messages[1].content.includes("ORIGINAL CARD SOURCES"));
+});
+
+test("GUID-backed saves inject only aliases and rejected alias typos cannot commit duplicate characters", async () => {
+  const h = harness(), guid = "12345678-1234-4321-8765-123456789abc";
+  const sources = structuredClone(SOURCES); sources.cards[0].id = guid;
+  h.cards.delete("ada"); h.cards.set(guid, sources.cards[0]); h.chats.get("chat").character_id = guid;
+  const proposed = fixtureState(); proposed.characters[0].id = `char:${guid}`;
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput(proposed, { sources, initialize: true })) }));
+  await h.select();
+  const initial = await h.engine.loadStore("chat"); assert.equal(initial.current.characters[0].id, `char:${guid}`);
+  const injection = await h.engine.intercept([{ role: "user", content: "Continue" }], { chatId: "chat", userId: "owner" });
+  assert.ok(injection.messages[0].content.includes('"id":"c1"')); assert.ok(!injection.messages[0].content.includes(guid));
+  assert.ok(!h.requests[0].messages.map(message => message.content).join("\n").includes(guid));
+  h.addTurn("Ada removes the coat.");
+  h.setResponse(async () => {
+    const invalid = modelOutput(proposed, { sources }); invalid.characters[0].id = "c99"; invalid.characters[0].visible.dressAndLayers = "Coat removed";
+    return { content: JSON.stringify(invalid) };
+  });
+  await h.engine.schedule("chat", {}, "owner");
+  const failed = await h.engine.loadStore("chat");
+  assert.equal(h.requests.length, 3); assert.match(failed.lastError, /unknown/); assert.ok(!failed.checkpoints["a1::0"]);
+  assert.deepEqual(failed.current, initial.current); assert.equal(failed.current.characters.length, 1);
+  assert.equal(failed.revision, initial.revision);
+  assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes(guid));
 });

@@ -207,6 +207,7 @@ export function createStoryEngine(api) {
     return prefix.previousState ? injectContinuity(messages, prefix.previousState, store.lastError ? "using last valid checkpoint" : "active", {
       focusCharacterId: context.characterId ?? context.targetCharacterId ?? latestAssistant?.character_id,
       recentText: contentToText(latestAssistant?.content),
+      sources: store.sources,
     }) : messages;
   }
   function register() { if (!registered && has("interceptor")) { api.registerInterceptor(intercept, 260); registered = true; } }

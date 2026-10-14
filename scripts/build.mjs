@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 const root = new URL("../", import.meta.url);
-const files = ["schemas.js", "context.js", "state.js", "tracker.js", "backend.js"];
+const files = ["schemas.js", "aliases.js", "context.js", "state.js", "tracker.js", "backend.js"];
 const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
 const parts = [];
 for (const file of files) parts.push((await readFile(new URL(`src/${file}`, root), "utf8")).replace(/^import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];\s*/gm, "").replace(/^export[ \t]+/gm, ""));

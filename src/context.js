@@ -1,4 +1,5 @@
 import { compactPromptState, trackerStateForLlm } from "./schemas.js";
+import { createAliasRegistry, encodeModelState } from "./aliases.js";
 
 export const ROLEPLAY_CONTEXT_CHARS = 24000;
 export const SOURCE_REFERENCE_CHARS = 6000;
@@ -31,7 +32,7 @@ export function selectRelevantState(state, text = "", { focusCharacterId } = {})
 // A projection is never parsed back as canonical state.
 export function buildRoleplayContext(state, text = "", options = {}) {
   const selected = selectRelevantState(state, text, options);
-  const compact = compactPromptState(selected);
+  const compact = encodeModelState(compactPromptState(selected), createAliasRegistry(options.sources, state));
   const limit = Math.max(1200, Math.min(64000, options.maxChars ?? ROLEPLAY_CONTEXT_CHARS));
   const projection = { omittedCharacters: state.characters.length - selected.characters.length,
     omittedPlaces: state.places.length - selected.places.length, omittedFields: false };

@@ -1,3 +1,11 @@
+# 1.2.0
+
+- Initialization, routine tracking, imported profile refresh and roleplay injection use short typed entity aliases instead of persistent IDs/GUIDs.
+- Per-request provider schemas enumerate supplied aliases; plain JSON prompts receive the same identity and creation catalog.
+- New characters, places, relationships and objectives use explicit creation placeholders and receive persistent IDs from the backend.
+- Strict alias/reference validation prevents unknown IDs from silently creating replacement entities. Rejected output gets one repair; failure retains the last valid checkpoint.
+- Canonical saves, imports/exports, chat-variable mirrors and fork identities remain compatible without migration. Date Simulator is unchanged.
+
 # 1.1.0
 
 - Routine tracker calls use extracted profiles and selected current state rather than resending full card sources.
