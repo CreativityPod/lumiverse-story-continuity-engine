@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runTracker, generationParameters, resolveOutputMode, normalizeConfig, TRACKER_SYSTEM_PROMPT } from "../src/tracker.js";
-import { SOURCES, outputState } from "./fixtures.js";
+import { SOURCES, outputState, fixtureState } from "./fixtures.js";
 
 test("provider-specific structured output and bounded configuration", () => {
   const config = normalizeConfig({ maxTokens: 99999, timeoutMs: 1 });
@@ -26,4 +26,15 @@ test("failed repair rejects and initialization cannot omit a card character", as
   assert.equal(calls, 2);
   assert.ok(TRACKER_SYSTEM_PROMPT.includes("fictional narrative clock, never wall-clock time"));
   assert.ok(TRACKER_SYSTEM_PROMPT.includes("User internal fields must all be Unknown"));
+});
+
+test("routine requests use extracted profiles and exclude raw cards while initialization retains sources", async () => {
+  const sources = structuredClone(SOURCES); sources.cards[0].description += " RAW_CARD_ONLY_SENTINEL."; sources.cards[0].exampleDialogue = "EXAMPLE_ONLY_SENTINEL"; sources.selectedOpening = "OPENING_ONLY_SENTINEL";
+  const previous = fixtureState(); previous.characters[0].profile.relationshipContext = "Longstanding station partnership"; previous.characters[0].profile.boundaries = "Do not open the private locker";
+  const requests = [], api = { connections: { list: async () => [] }, generate: { quiet: async input => { requests.push(input); return { content: JSON.stringify(outputState(previous)) }; } } };
+  await runTracker(api, { initialize: true, sources, sourceMessageId: "card-baseline" }, {}, "owner");
+  await runTracker(api, { sources, previousState: previous, userText: "Hello", assistantText: "Ada nods.", sourceMessageId: "a1" }, {}, "owner");
+  const initial = requests[0].messages[1].content, routine = requests[1].messages[1].content;
+  for (const sentinel of ["RAW_CARD_ONLY_SENTINEL", "EXAMPLE_ONLY_SENTINEL", "OPENING_ONLY_SENTINEL"]) { assert.ok(initial.includes(sentinel)); assert.ok(!routine.includes(sentinel)); }
+  assert.ok(routine.includes("Longstanding station partnership")); assert.ok(routine.includes("Do not open the private locker")); assert.ok(!routine.includes("STABLE CARD SOURCES"));
 });

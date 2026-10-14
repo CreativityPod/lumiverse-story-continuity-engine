@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const archive = join(root, "release", `Story_Continuity_Engine_v${pkg.version}.zip`);
-const entries = ["spindle.json", "package.json", "package-lock.json", "README.md", "ARCHITECTURE.md", ".gitignore"];
+const entries = ["spindle.json", "package.json", "package-lock.json", "README.md", "ARCHITECTURE.md", "CHANGELOG.md", ".gitignore"];
 async function collect(directory) {
   for (const entry of await readdir(join(root, directory), { withFileTypes: true })) {
     const path = `${directory}/${entry.name}`;

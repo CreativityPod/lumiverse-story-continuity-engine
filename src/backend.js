@@ -1,4 +1,4 @@
-import { validateState, publicTrackerSnapshot, remapStateSources } from "./schemas.js";
+import { validateState, publicTrackerSnapshot, remapStateSources, legacyTrackerState } from "./schemas.js";
 import { CHAT_KEYS, IMPORT_LOADED_TEXT, cardSources, fingerprint, isSpecializedCard, contentToText,
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
@@ -54,6 +54,7 @@ export function createStoryEngine(api) {
   async function mirror(store) {
     if (!has("chat_mutation") || deleted.has(store.chatId)) return;
     for (const [key, value] of [[CHAT_KEYS.state, store.current && !store.blocked ? JSON.stringify(store.current) : ""],
+      [CHAT_KEYS.legacyState, store.current && !store.blocked ? JSON.stringify(legacyTrackerState(store.current)) : ""],
       [CHAT_KEYS.public, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current)) : ""]]) {
       if (!api.variables.chat.get || await api.variables.chat.get(store.chatId, key) !== value) await api.variables.chat.set(store.chatId, key, value);
     }
@@ -108,7 +109,7 @@ export function createStoryEngine(api) {
       const epoch = context.anchor ? `import:${context.anchor.id}` : `cards:${cards.map(card => card.id).join(",")}`;
       const currentFingerprint = fingerprint(sources);
       const openingChanged = !context.anchor && store.sources && store.sources.selectedOpening !== sources.selectedOpening;
-      if (store.epoch !== epoch || openingChanged || options.refreshCards) {
+      if (store.epoch !== epoch || openingChanged || options.refreshCards && !context.anchor) {
         const revision = store.revision, lastRevisionAt = store.lastRevisionAt;
         store = { ...createStore(chatId), revision, lastRevisionAt, epoch };
       }
@@ -122,6 +123,21 @@ export function createStoryEngine(api) {
       } else if (!context.anchor) {
         if (store.sources && store.sourceFingerprint !== currentFingerprint) store.pendingCardFingerprint = currentFingerprint;
         if (!store.sources || !store.baseline) { store.sources = sources; store.sourceFingerprint = currentFingerprint; store.pendingCardFingerprint = ""; }
+      }
+      if (options.refreshCards && context.anchor) {
+        const refreshed = await runTracker(api, { initialize: true, refreshProfiles: true, sources: store.sources,
+          previousState: store.baseline, sourceMessageId: context.anchor.id, remainingMs: Math.max(1000, deadline - Date.now()) }, config, userId);
+        if (!(await matches(chatId, messages, context.anchor.index))) throw new Error("The imported setup changed during profile refresh.");
+        const enriched = structuredClone(store.baseline);
+        for (const char of enriched.characters) {
+          const extracted = refreshed.characters.find(candidate => candidate.id === char.id);
+          if (!extracted || char.controller === "user") continue;
+          for (const key of Object.keys(char.profile)) if (char.profile[key] === "Unknown" && extracted.profile[key] !== "Unknown") char.profile[key] = extracted.profile[key];
+        }
+        if (JSON.stringify(enriched) !== JSON.stringify(store.baseline)) {
+          store.baseline = validateState(enriched); store.initialSetup = { ...store.initialSetup, state: structuredClone(store.baseline) };
+          store.checkpoints = {}; commitRevision(store);
+        }
       }
       store.importable = !context.anchor && !messages.some(message => message.role === "user");
       store.canBegin = Boolean(context.anchor && !turns.length && !messages.some(message => message.role === "user" && /^\/story-begin\b/.test(contentToText(message.content))));
@@ -148,7 +164,7 @@ export function createStoryEngine(api) {
       for (let index = prefix.count; index < turns.length; index++) {
         const turn = turns[index];
         const isOpening = !context.anchor && index === 0 && !turn.user && contentToText(turn.assistant.content) === store.sources.selectedOpening;
-        const state = isOpening ? previousState : await runTracker(api, { sources: store.sources, previousState,
+        const state = isOpening ? previousState : await runTracker(api, { sources: store.sources, previousState, focusCharacterId: turn.assistant.character_id,
           userText: contentToText(turn.user?.content), assistantText: contentToText(turn.assistant.content),
           sourceMessageId: String(turn.assistant.id), isOpening, remainingMs: remaining() }, config, userId);
         if (!(await matches(chatId, messages, turn.index))) throw new Error("The selected branch changed during tracking; stale output was discarded.");
@@ -187,7 +203,11 @@ export function createStoryEngine(api) {
     const selectedContext = transcriptContext(selectedMessages);
     if ((selectedContext.anchor ? `import:${selectedContext.anchor.id}` : store.epoch.startsWith("import:") ? "removed-import" : store.epoch) !== store.epoch) return messages;
     const prefix = validCheckpointPrefix(store, listEligibleTurns(selectedMessages, selectedContext));
-    return prefix.previousState ? injectContinuity(messages, prefix.previousState, store.lastError ? "using last valid checkpoint" : "active") : messages;
+    const latestAssistant = selectedMessages.findLast(message => message.role === "assistant" && !message.metadata?.story_continuity_setup);
+    return prefix.previousState ? injectContinuity(messages, prefix.previousState, store.lastError ? "using last valid checkpoint" : "active", {
+      focusCharacterId: context.characterId ?? context.targetCharacterId ?? latestAssistant?.character_id,
+      recentText: contentToText(latestAssistant?.content),
+    }) : messages;
   }
   function register() { if (!registered && has("interceptor")) { api.registerInterceptor(intercept, 260); registered = true; } }
 

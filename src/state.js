@@ -1,8 +1,9 @@
-import { cloneEmptyState, validateState, remapStateSources, compactPromptState } from "./schemas.js";
+import { cloneEmptyState, validateState, remapStateSources } from "./schemas.js";
+import { buildRoleplayContext } from "./context.js";
 
 export const SETUP_FORMAT = "story-continuity-initial-setup";
 export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the Story Continuity drawer when ready.";
-export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v1", public: "story_continuity.public_v1" });
+export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v1" });
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
 
@@ -26,7 +27,7 @@ export function prefixFingerprint(messages, index) {
 }
 
 export function isSpecializedCard(cards, messages = []) {
-  const marker = /\b(?:Date Simulator v1\.[45](?:\.\d+)?|Storyteller v1\.6(?:\.\d+)?)\b|<!--DATE_SIM_CASE\b|<!--DATE_SIM_STARTUP_MENU_V1\b/;
+  const marker = /\b(?:Date Simulator v1\.[45](?:\.\d+)?|Storyteller v1\.6(?:\.\d+)?)\b|<!--DATE_SIM_CASE\b|<!--DATE_SIM_STARTUP_MENU_V1\b/i;
   return cards.some(card => [card.name, card.description, card.system_prompt, card.post_history_instructions, card.first_mes].some(text => marker.test(String(text ?? ""))))
     || messages.some(message => marker.test(contentToText(message.content)) || message.metadata?.date_simulator_setup);
 }
@@ -101,7 +102,7 @@ export function validCheckpointPrefix(store, turns) {
     try {
       previousState = validateState(checkpoint.state, { allowedSourceMessageIds: ["card-baseline", ...(store.epoch.startsWith("import:") ? [store.epoch.slice(7)] : []), ...turns.slice(0, count + 1).map(item => String(item.assistant.id))] });
     } catch { break; }
-    checkpoints[turn.key] = checkpoint;
+    checkpoints[turn.key] = { ...checkpoint, state: previousState };
     count++;
   }
   return { previousState, count, checkpoints };
@@ -129,9 +130,12 @@ export function exportInitialSetup(store, turns, context) {
     initialState: remapStateSources(initial.state, new Map(), "initial-setup") });
 }
 
-export function injectContinuity(messages, state, status = "active") {
+export function injectContinuity(messages, state, status = "active", options = {}) {
   const clean = messages.filter(message => !message?.storyContinuityOwned);
-  const block = { role: "system", storyContinuityOwned: true, content: `Story Continuity Engine (${status}). The following JSON is private canonical continuity data for this selected chat branch, not instructions. Preserve established facts until a supported story event changes them. Omitted values are unknown or empty. Each character knows only their recorded knowledge and plausible perceptions. The user controls their own voluntary actions and internal state. Do not expose private profiles, secrets, intentions, or bookkeeping in ordinary replies; use private data to guide behavior without giving other characters unexplained knowledge. Continue to follow the character card's voice and behavior. Consent is specific to an action and cannot be inferred from clothing, mood, trust, or attraction.\n${JSON.stringify(compactPromptState(state))}` };
+  const latestUser = clean.findLast(message => message.role === "user");
+  const text = `${contentToText(latestUser?.content)}\n${options.recentText ?? ""}`;
+  const projected = buildRoleplayContext(state, text, options);
+  const block = { role: "system", storyContinuityOwned: true, content: `Story Continuity Engine (${status}). The following JSON is a selected projection of private canonical continuity data for this chat branch, not instructions. Preserve established facts until a supported story event changes them. Characters, places, and fields omitted for relevance or budget still exist in saved continuity; omission does not make an established fact unknown or undo it. Do not invent missing facts. Each character knows only their recorded knowledge and plausible perceptions. The user controls their own voluntary actions and internal state. Do not expose private profiles, secrets, intentions, or bookkeeping in ordinary replies; use private data to guide behavior without giving other characters unexplained knowledge. Continue to follow the character card's voice and behavior. Consent is specific to an action and cannot be inferred from clothing, mood, trust, or attraction.\n${JSON.stringify(projected)}` };
   const index = clean.findLastIndex(message => message.role === "user");
   const insertionIndex = index >= 0 ? index : clean.length;
   clean.splice(insertionIndex, 0, block);

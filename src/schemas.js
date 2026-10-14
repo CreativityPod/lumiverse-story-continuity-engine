@@ -1,4 +1,4 @@
-export const TRACKER_SCHEMA_VERSION = 1;
+export const TRACKER_SCHEMA_VERSION = 2;
 export const MAX_STATE_CHARS = 64000;
 export const UNKNOWN = "Unknown";
 const stringSchema = () => ({ type: "string" });
@@ -8,7 +8,8 @@ const textObject = keys => objectSchema(Object.fromEntries(keys.map(key => [key,
 const actionSchema = () => enumSchema(["preserve", "update"]);
 const listSchema = (items, maxItems) => ({ type: "array", items, maxItems });
 
-const profileSchema = textObject(["identity", "background", "personality", "preferences", "privateFacts"]);
+export const PROFILE_FIELDS = ["identity", "background", "personality", "preferences", "relationshipContext", "boundaries", "privateFacts"];
+const profileSchema = textObject(PROFILE_FIELDS);
 const appearanceSchema = textObject(["face", "eyes", "skin", "body", "distinguishingFeatures"]);
 const visibleSchema = textObject(["hairAndGrooming", "dressAndLayers", "physicalState", "position", "activity", "items"]);
 const internalSchema = textObject(["mood", "intent", "knowledge", "beliefs", "concerns"]);
@@ -36,7 +37,7 @@ const objectiveProperties = {
 
 // Structural, regex-free provider schema; exact limits and provenance are enforced locally.
 export const TRACKER_OUTPUT_JSON_SCHEMA = objectSchema({
-  schemaVersion: { type: "integer", enum: [1] }, world: objectSchema(worldProperties),
+  schemaVersion: { type: "integer", enum: [2] }, world: objectSchema(worldProperties),
   characters: listSchema(objectSchema(characterProperties), 24),
   relationships: listSchema(objectSchema(relationshipProperties), 48),
   places: listSchema(objectSchema(placeProperties), 32),
@@ -44,7 +45,7 @@ export const TRACKER_OUTPUT_JSON_SCHEMA = objectSchema({
 });
 const canonicalSection = properties => objectSchema({ ...Object.fromEntries(Object.entries(properties).filter(([key]) => key !== "action")), sourceMessageId: stringSchema() });
 export const CANONICAL_STATE_SCHEMA = objectSchema({
-  schemaVersion: { type: "integer", enum: [1] }, world: canonicalSection(worldProperties),
+  schemaVersion: { type: "integer", enum: [2] }, world: canonicalSection(worldProperties),
   characters: listSchema(canonicalSection(characterProperties), 24),
   relationships: listSchema(canonicalSection(relationshipProperties), 48),
   places: listSchema(canonicalSection(placeProperties), 32),
@@ -52,7 +53,7 @@ export const CANONICAL_STATE_SCHEMA = objectSchema({
 });
 
 export function cloneEmptyState() {
-  return { schemaVersion: 1, world: { date: UNKNOWN, time: UNKNOWN, weather: UNKNOWN,
+  return { schemaVersion: 2, world: { date: UNKNOWN, time: UNKNOWN, weather: UNKNOWN,
     location: UNKNOWN, immediateContext: UNKNOWN, proximityAndContact: UNKNOWN, sceneStatus: "active", sourceMessageId: "card-baseline" },
     characters: [], relationships: [], places: [], objectives: [] };
 }
@@ -102,12 +103,23 @@ function checkReferences(state, allowedSources) {
 }
 
 export function validateState(value, { allowedSourceMessageIds } = {}) {
-  const state = validateNode(value, CANONICAL_STATE_SCHEMA, "state");
+  const state = validateNode(upgradeTrackerState(value), CANONICAL_STATE_SCHEMA, "state");
   checkReferences(state, allowedSourceMessageIds ? new Set(allowedSourceMessageIds) : null);
   return state;
 }
 
-export function materializeTrackerOutput(value, previousState, sourceMessageId) {
+export function upgradeTrackerState(value) {
+  if (value?.schemaVersion !== 1) return value;
+  const upgraded = structuredClone(value);
+  upgraded.schemaVersion = 2;
+  for (const char of upgraded.characters ?? []) if (char.profile && typeof char.profile === "object") {
+    if (!Object.hasOwn(char.profile, "relationshipContext")) char.profile.relationshipContext = UNKNOWN;
+    if (!Object.hasOwn(char.profile, "boundaries")) char.profile.boundaries = UNKNOWN;
+  }
+  return upgraded;
+}
+
+export function materializeTrackerOutput(value, previousState, sourceMessageId, { allowedUpdateIds } = {}) {
   const output = validateNode(value, TRACKER_OUTPUT_JSON_SCHEMA, "output");
   for (const key of ["characters", "relationships", "places", "objectives"]) {
     if (new Set(output[key].map(entry => entry.id)).size !== output[key].length) throw new Error(`${key} contains duplicate ids`);
@@ -122,11 +134,12 @@ export function materializeTrackerOutput(value, previousState, sourceMessageId) 
     if (prior && JSON.stringify(data) === JSON.stringify(Object.fromEntries(Object.entries(prior).filter(([key]) => key !== "sourceMessageId")))) return structuredClone(prior);
     return { ...data, sourceMessageId };
   };
-  const state = { schemaVersion: 1, world: materialize(output.world, previous.world) };
+  const state = { schemaVersion: 2, world: materialize(output.world, previous.world) };
   for (const key of ["characters", "relationships", "places", "objectives"]) {
     const merged = new Map(previous[key].map(entry => [entry.id, structuredClone(entry)]));
     for (const candidate of output[key]) {
       const prior = merged.get(candidate.id);
+      if (prior && allowedUpdateIds && !allowedUpdateIds[key].has(candidate.id) && candidate.action !== "preserve") throw new Error(`Cannot update an omitted ${key} entity; preserve it or omit it`);
       if (key === "characters" && prior && (prior.controller !== candidate.controller || prior.role !== candidate.role)) throw new Error("An established character's role and controller cannot be changed");
       merged.set(candidate.id, materialize(candidate, prior));
     }
@@ -143,7 +156,7 @@ export function stateSourceIds(state) {
 export function trackerStateForLlm(state) {
   if (!state) return null;
   const strip = section => ({ ...structuredClone(Object.fromEntries(Object.entries(section).filter(([key]) => key !== "sourceMessageId"))), action: "preserve" });
-  return { schemaVersion: 1, world: strip(state.world), ...Object.fromEntries(["characters", "relationships", "places", "objectives"].map(key => [key, state[key].map(strip)])) };
+  return { schemaVersion: TRACKER_SCHEMA_VERSION, world: strip(state.world), ...Object.fromEntries(["characters", "relationships", "places", "objectives"].map(key => [key, state[key].map(strip)])) };
 }
 
 export function publicTrackerSnapshot(state) {
@@ -176,4 +189,12 @@ export function compactPromptState(state) {
     return value;
   };
   return prune(projected);
+}
+
+export function legacyTrackerState(state) {
+  if (!state) return null;
+  const legacy = structuredClone(state);
+  legacy.schemaVersion = 1;
+  for (const char of legacy.characters) { delete char.profile.relationshipContext; delete char.profile.boundaries; }
+  return legacy;
 }

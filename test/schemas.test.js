@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateState, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA } from "../src/schemas.js";
+import { validateState, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA, legacyTrackerState } from "../src/schemas.js";
 import { fixtureState, character, outputState } from "./fixtures.js";
 
 test("state validates and the observable projection omits all private sections", () => {
@@ -62,4 +62,13 @@ test("compact prompt retains private continuity but omits defaults and provenanc
   const text = JSON.stringify(compactPromptState(fixtureState()));
   assert.ok(text.includes("Lantern Guild")); assert.ok(!text.includes("sourceMessageId")); assert.ok(!text.includes('"Unknown"'));
   assert.ok(!JSON.stringify(TRACKER_OUTPUT_JSON_SCHEMA).includes('"pattern"'));
+});
+
+test("legacy v1 state migrates conservatively, preserving provenance and existing profiles", () => {
+  const current = fixtureState(), legacy = legacyTrackerState(current);
+  assert.equal(legacy.schemaVersion, 1); assert.ok(!Object.hasOwn(legacy.characters[0].profile, "boundaries"));
+  const before = JSON.stringify(legacy), upgraded = validateState(legacy);
+  assert.equal(upgraded.schemaVersion, 2); assert.equal(upgraded.characters[0].profile.boundaries, "Unknown"); assert.equal(upgraded.characters[0].profile.relationshipContext, "Unknown");
+  assert.equal(upgraded.characters[0].profile.privateFacts, current.characters[0].profile.privateFacts); assert.equal(upgraded.characters[0].sourceMessageId, "card-baseline"); assert.equal(JSON.stringify(legacy), before);
+  assert.equal(publicTrackerSnapshot(upgraded).characters[0].profile, undefined);
 });

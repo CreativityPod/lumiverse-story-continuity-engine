@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
 import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT } from "../src/state.js";
-import { remapStateSources } from "../src/schemas.js";
+import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState, outputState } from "./fixtures.js";
 
 function harness() {
@@ -135,4 +135,37 @@ test("damaged saved state rebuilds and an edited import anchor cannot export sta
   h.messages.get("chat").at(-1).content = "Edited confirmation";
   await h.engine.handleFrontend({ type: "story_export_setup", chatId: "chat", requestId: "export" }, "owner");
   assert.equal(h.sent.at(-1).payload.ok, false); assert.match(h.sent.at(-1).payload.message, /anchor/);
+});
+
+test("old saved states and portable v1 setups upgrade without tracker regeneration", async () => {
+  const h = harness(); await h.select();
+  const store = h.files.get(h.engine.pathFor("chat"));
+  store.baseline = legacyTrackerState(store.baseline); store.current = legacyTrackerState(store.current); store.initialSetup.state = legacyTrackerState(store.initialSetup.state);
+  for (const checkpoint of Object.values(store.checkpoints)) checkpoint.state = legacyTrackerState(checkpoint.state);
+  const count = h.requests.length, revision = store.revision;
+  await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).revision, revision);
+  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.state}`)).schemaVersion, 2);
+  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.legacyState}`)).schemaVersion, 1);
+  const legacySetup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(legacyTrackerState(fixtureState()), new Map(), "initial-setup") };
+  legacySetup.initialState = legacyTrackerState(legacySetup.initialState);
+  await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(legacySetup), requestId: "legacy-import" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).current.schemaVersion, 2);
+});
+
+test("explicit imported-profile refresh fills missing stable fields without altering recorded starting conditions", async () => {
+  const h = harness(); await h.select();
+  const initial = legacyTrackerState(remapStateSources(fixtureState(), new Map(), "initial-setup"));
+  const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: initial };
+  await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup), requestId: "import" }, "owner");
+  h.setResponse(async () => {
+    const proposed = outputState(); proposed.characters[0].profile.boundaries = "Keep the private locker closed"; proposed.characters[0].profile.relationshipContext = "Former colleague of the stationmaster";
+    proposed.characters[0].visible.dressAndLayers = "Invented replacement outfit"; proposed.world.time = "Changed time";
+    return { content: JSON.stringify(proposed) };
+  });
+  const calls = h.requests.length; await h.engine.schedule("chat", { refreshCards: true }, "owner");
+  const store = await h.engine.loadStore("chat"); assert.equal(h.requests.length, calls + 1);
+  assert.equal(store.current.characters[0].profile.boundaries, "Keep the private locker closed"); assert.equal(store.current.characters[0].profile.relationshipContext, "Former colleague of the stationmaster");
+  assert.equal(store.current.characters[0].visible.dressAndLayers, "Blue coat"); assert.equal(store.current.world.time, "Midnight");
+  assert.ok(h.requests.at(-1).messages[1].content.includes("ORIGINAL CARD SOURCES"));
 });
