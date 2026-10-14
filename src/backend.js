@@ -1,11 +1,11 @@
 import { validateState, publicTrackerSnapshot, remapStateSources, legacyTrackerState } from "./schemas.js";
-import { CHAT_KEYS, IMPORT_LOADED_TEXT, cardSources, fingerprint, isSpecializedCard, contentToText,
+import { CHAT_KEYS, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
 import { DEFAULT_CONFIG, normalizeConfig, runTracker } from "./tracker.js";
 
 export function createStoryEngine(api) {
-  const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map();
+  const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map();
   let registered = false;
   const userKey = userId => userId || "default";
   const safeToken = chatId => `${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 150)}-${fingerprint(String(chatId))}`;
@@ -85,9 +85,46 @@ export function createStoryEngine(api) {
   async function matches(chatId, messages, index) {
     if (deleted.has(chatId)) return false;
     const latest = await api.chat.getMessages(chatId);
-    return latest[index]?.id === messages[index]?.id && prefixFingerprint(latest, index) === prefixFingerprint(messages, index);
+    const currentIndex = latest.findIndex(message => message.id === messages[index]?.id);
+    return currentIndex >= 0 && prefixFingerprint(latest, currentIndex) === prefixFingerprint(messages, index);
   }
   const commitRevision = store => { store.revision++; store.lastRevisionAt = new Date().toISOString(); };
+
+  function rememberNotices(chatId, messages) {
+    const ids = noticeIds.get(chatId) ?? new Set();
+    for (const message of messages) if (isInitializationNotice(message)) ids.add(String(message.id));
+    noticeIds.set(chatId, ids);
+  }
+  async function writeInitializationNotice(chatId, notice, phase, create = false) {
+    if (deleted.has(chatId)) return null;
+    try {
+      const content = INITIALIZATION_NOTICE_TEXT[phase];
+      if (notice) {
+        // Respect a user deleting the notice while the tracker is running.
+        const latest = await api.chat.getMessages(chatId);
+        notice = latest.find(message => message.id === notice.id && isInitializationNotice(message));
+        if (!notice) return null;
+        rememberNotices(chatId, [notice]);
+        if (notice.content !== content || notice.metadata?.story_continuity_notice?.status !== phase) {
+          const metadata = { ...notice.metadata, story_continuity_notice: { version: 1, status: phase } };
+          await api.chat.updateMessage(chatId, notice.id, { content, metadata, skipChunkRebuild: true });
+          notice = { ...notice, content, metadata };
+        }
+      } else if (create) {
+        const metadata = { story_continuity_notice: { version: 1, status: phase } };
+        const result = await api.chat.appendMessage(chatId, { role: "system", content, metadata });
+        notice = { id: result.id, role: "system", content, metadata };
+        rememberNotices(chatId, [notice]);
+      }
+      // Lumiverse's hidden flag excludes recall embeddings; the interceptor
+      // separately removes the still-visible status row from linear history.
+      if (notice && notice.extra?.hidden !== true && api.chat.setMessageHidden) await api.chat.setMessageHidden(chatId, notice.id, true);
+    } catch {
+      // A status-message failure must not prevent canonical tracking.
+      api.log.warn("Story continuity initialization notice could not be updated.");
+    }
+    return notice;
+  }
 
   async function reconcile(chatId, options = {}, userId = users.get(chatId)) {
     if (!chatId || deleted.has(chatId)) return;
@@ -96,10 +133,15 @@ export function createStoryEngine(api) {
     let store = await loadStore(chatId);
     processing.add(chatId);
     const deadline = Date.now() + 240000;
+    let initializationNotice = null, finishNotice = false;
     try {
       const messages = await api.chat.getMessages(chatId);
+      rememberNotices(chatId, messages);
+      initializationNotice = messages.find(isInitializationNotice) ?? null;
+      finishNotice = initializationNotice?.metadata?.story_continuity_notice?.status === "generating";
       const { cards, sources } = await getSources(chatId, messages, userId);
       if (isSpecializedCard(cards, messages)) {
+        finishNotice = false;
         store.blocked = "This Date Simulator/Storyteller chat belongs to Date Simulator Continuity Engine.";
         store.current = null; store.lastError = "";
         await saveStore(store); await mirror(store); return;
@@ -152,6 +194,8 @@ export function createStoryEngine(api) {
       await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
+        initializationNotice = await writeInitializationNotice(chatId, initializationNotice, "generating", store.revision === 0);
+        finishNotice = Boolean(initializationNotice);
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
         const freshMessages = await api.chat.getMessages(chatId);
@@ -179,7 +223,10 @@ export function createStoryEngine(api) {
       store.lastError = String(error?.message ?? error).slice(0, 600);
       await saveStore(store);
       api.log.warn(`Story continuity update failed: ${store.lastError}`);
-    } finally { processing.delete(chatId); await publish(chatId, userId, options.includePrivate); }
+    } finally {
+      if (finishNotice) await writeInitializationNotice(chatId, initializationNotice, store.lastError || !store.current ? "failed" : "ready");
+      processing.delete(chatId); await publish(chatId, userId, options.includePrivate);
+    }
   }
   function enqueue(chatId, operation) {
     const next = (queues.get(chatId) ?? Promise.resolve()).catch(() => undefined).then(operation);
@@ -191,24 +238,32 @@ export function createStoryEngine(api) {
 
   async function intercept(messages, context) {
     const config = await loadConfig(), chatId = context?.chatId;
-    if (!config.enabled || !chatId || deleted.has(chatId) || required.some(permission => !has(permission))) return messages;
-    if (isSpecializedCard([], messages)) return messages;
+    let clean = stripInitializationNotices(messages);
+    if (!config.enabled || !chatId || deleted.has(chatId) || required.some(permission => !has(permission))) {
+      if (chatId && !deleted.has(chatId) && has("chat_mutation")) clean = stripInitializationNotices(clean, await api.chat.getMessages(chatId));
+      return clean;
+    }
+    if (isSpecializedCard([], clean)) {
+      clean = stripInitializationNotices(clean, await api.chat.getMessages(chatId));
+      if (isSpecializedCard([], clean)) return clean;
+    }
     await schedule(chatId, {}, context.userId ?? users.get(chatId));
     const store = await loadStore(chatId);
-    if (!store.current || store.blocked) return messages;
-    // Revalidate the currently selected prefix even when a tracker update failed.
     const selectedMessages = await api.chat.getMessages(chatId);
+    clean = stripInitializationNotices(clean, selectedMessages);
+    if (!store.current || store.blocked) return clean;
+    // Revalidate the currently selected prefix even when a tracker update failed.
     const fresh = await getSources(chatId, selectedMessages, context.userId ?? users.get(chatId));
-    if (isSpecializedCard(fresh.cards, selectedMessages) || (!store.epoch.startsWith("import:") && store.sources.selectedOpening !== fresh.sources.selectedOpening)) return messages;
+    if (isSpecializedCard(fresh.cards, selectedMessages) || (!store.epoch.startsWith("import:") && store.sources.selectedOpening !== fresh.sources.selectedOpening)) return clean;
     const selectedContext = transcriptContext(selectedMessages);
-    if ((selectedContext.anchor ? `import:${selectedContext.anchor.id}` : store.epoch.startsWith("import:") ? "removed-import" : store.epoch) !== store.epoch) return messages;
+    if ((selectedContext.anchor ? `import:${selectedContext.anchor.id}` : store.epoch.startsWith("import:") ? "removed-import" : store.epoch) !== store.epoch) return clean;
     const prefix = validCheckpointPrefix(store, listEligibleTurns(selectedMessages, selectedContext));
-    const latestAssistant = selectedMessages.findLast(message => message.role === "assistant" && !message.metadata?.story_continuity_setup);
-    return prefix.previousState ? injectContinuity(messages, prefix.previousState, store.lastError ? "using last valid checkpoint" : "active", {
+    const latestAssistant = selectedMessages.findLast(message => message.role === "assistant" && !message.metadata?.story_continuity_setup && !isInitializationNotice(message));
+    return prefix.previousState ? injectContinuity(clean, prefix.previousState, store.lastError ? "using last valid checkpoint" : "active", {
       focusCharacterId: context.characterId ?? context.targetCharacterId ?? latestAssistant?.character_id,
       recentText: contentToText(latestAssistant?.content),
       sources: store.sources,
-    }) : messages;
+    }) : clean;
   }
   function register() { if (!registered && has("interceptor")) { api.registerInterceptor(intercept, 260); registered = true; } }
 
@@ -357,7 +412,12 @@ export function createStoryEngine(api) {
   register();
   api.onFrontendMessage(handleFrontend);
   api.on("CHAT_SWITCHED", (payload, userId) => { const chatId = adopt(payload?.chatId, userId); return chatId ? schedule(chatId, {}, userId) : publish(null, userId); });
-  for (const name of ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) api.on(name, (payload, userId) => payload?.chatId ? schedule(payload.chatId, {}, userId) : undefined);
+  for (const name of ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) api.on(name, (payload, userId) => {
+    if (!payload?.chatId) return;
+    const id = payload.messageId ?? payload.message?.id;
+    if (isInitializationNotice(payload.message) || id != null && noticeIds.get(payload.chatId)?.has(String(id))) return;
+    return schedule(payload.chatId, {}, userId);
+  });
   for (const name of ["GENERATION_STARTED", "GENERATION_ENDED", "GENERATION_STOPPED"]) api.on(name, payload => {
     if (!payload?.chatId) return;
     if (name === "GENERATION_STARTED") generating.add(payload.chatId); else generating.delete(payload.chatId);
@@ -371,6 +431,7 @@ export function createStoryEngine(api) {
     const chatId = payload?.id ?? payload?.chatId;
     if (!chatId) return;
     deleted.add(chatId);
+    noticeIds.delete(chatId);
     return enqueue(chatId, () => api.storage.delete(pathFor(chatId)));
   });
   api.permissions.onChanged(({ permission, granted }) => { if (permission === "interceptor" && granted) register(); });

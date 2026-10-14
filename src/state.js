@@ -6,10 +6,34 @@ export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the St
 export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v1" });
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
+export const INITIALIZATION_NOTICE_TEXT = Object.freeze({
+  generating: "**Story Continuity Engine**\n\nGenerating the initial character profiles and starting story state… Please wait.",
+  ready: "**Story Continuity Engine**\n\nInitial profiles and story state are ready.",
+  failed: "**Story Continuity Engine**\n\nInitialization failed. Open Story Continuity for details and retry.",
+});
 
 export function contentToText(content) {
   if (typeof content === "string") return content;
   return Array.isArray(content) ? content.filter(part => part?.type === "text").map(part => part.text ?? "").join("\n") : "";
+}
+
+export function isInitializationNotice(message) {
+  if (!message || message.role === "user" || message.is_user === true) return false;
+  return [message.metadata, message.extra?.spindle_metadata, message.sourceMessageMetadata,
+    message.sourceMessageMetadata?.spindle_metadata].some(metadata => metadata?.story_continuity_notice?.version === 1);
+}
+
+// Host history projections can carry source IDs instead of extension metadata.
+// Exact text is a fallback for older hosts; user-authored text is never matched.
+export function stripInitializationNotices(messages, storedMessages = []) {
+  const ids = new Set(storedMessages.filter(isInitializationNotice).map(message => String(message.id)));
+  return messages.filter(message => {
+    if (isInitializationNotice(message)) return false;
+    const id = message.sourceMessageId ?? message.id;
+    if (id != null) return !ids.has(String(id));
+    if (message.__isChatHistory && Number.isInteger(message.sourceIndexInChat) && isInitializationNotice(storedMessages[message.sourceIndexInChat])) return false;
+    return message.role === "user" || !Object.values(INITIALIZATION_NOTICE_TEXT).includes(contentToText(message.content).trim());
+  });
 }
 
 export function fingerprint(value) {
@@ -22,18 +46,18 @@ export function fingerprint(value) {
 
 export function messageKey(message) { return `${message.id}::${Number.isInteger(message.swipe_id) ? message.swipe_id : 0}`; }
 export function prefixFingerprint(messages, index) {
-  return fingerprint(messages.slice(0, index + 1).map(message => ({ id: message.id, role: message.role, swipe: message.swipe_id ?? 0,
+  return fingerprint(messages.slice(0, index + 1).filter(message => !isInitializationNotice(message)).map(message => ({ id: message.id, role: message.role, swipe: message.swipe_id ?? 0,
     text: contentToText(message.content), setup: message.metadata?.story_continuity_setup ?? null })));
 }
 
 export function isSpecializedCard(cards, messages = []) {
   const marker = /\b(?:Date Simulator v1\.[45](?:\.\d+)?|Storyteller v1\.6(?:\.\d+)?)\b|<!--DATE_SIM_CASE\b|<!--DATE_SIM_STARTUP_MENU_V1\b/i;
   return cards.some(card => [card.name, card.description, card.system_prompt, card.post_history_instructions, card.first_mes].some(text => marker.test(String(text ?? ""))))
-    || messages.some(message => marker.test(contentToText(message.content)) || message.metadata?.date_simulator_setup);
+    || messages.some(message => !isInitializationNotice(message) && (marker.test(contentToText(message.content)) || message.metadata?.date_simulator_setup));
 }
 
 export function cardSources(cards, messages, lore = []) {
-  const greeting = messages.find(message => message.role === "assistant" && !message.metadata?.story_continuity_setup);
+  const greeting = messages.find(message => message.role === "assistant" && !message.metadata?.story_continuity_setup && !isInitializationNotice(message));
   const sources = { cards: cards.map(card => ({ id: card.id, name: card.name, description: card.description ?? "", personality: card.personality ?? "",
     scenario: card.scenario ?? "", exampleDialogue: card.mes_example ?? "", creatorNotes: card.creator_notes ?? "",
     selectedGreeting: greeting ? "See selected opening below." : card.first_mes ?? "" })),
@@ -43,7 +67,7 @@ export function cardSources(cards, messages, lore = []) {
 }
 
 export function importedSetupForMessage(message) {
-  if (message.role !== "assistant" || contentToText(message.content) !== IMPORT_LOADED_TEXT || (message.swipe_id ?? 0) !== 0 || !message.metadata?.story_continuity_setup) return null;
+  if (isInitializationNotice(message) || message.role !== "assistant" || contentToText(message.content) !== IMPORT_LOADED_TEXT || (message.swipe_id ?? 0) !== 0 || !message.metadata?.story_continuity_setup) return null;
   return validateSetupFile(message.metadata.story_continuity_setup);
 }
 
@@ -60,10 +84,11 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
   const turns = [];
   for (let index = context.startIndex; index < messages.length; index++) {
     const assistant = messages[index];
-    if (assistant.role !== "assistant" || !assistant.id || !contentToText(assistant.content).trim() || assistant.metadata?.story_continuity_observation) continue;
+    if (isInitializationNotice(assistant) || assistant.role !== "assistant" || !assistant.id || !contentToText(assistant.content).trim() || assistant.metadata?.story_continuity_observation) continue;
     if (assistant.metadata?.story_continuity_setup) continue;
     let user = null;
     for (let prev = index - 1; prev >= context.startIndex; prev--) {
+      if (isInitializationNotice(messages[prev])) continue;
       if (messages[prev].role === "user") { user = messages[prev]; break; }
       if (messages[prev].role === "assistant") break;
     }
@@ -131,7 +156,7 @@ export function exportInitialSetup(store, turns, context) {
 }
 
 export function injectContinuity(messages, state, status = "active", options = {}) {
-  const clean = messages.filter(message => !message?.storyContinuityOwned);
+  const clean = stripInitializationNotices(messages).filter(message => !message?.storyContinuityOwned);
   const latestUser = clean.findLast(message => message.role === "user");
   const text = `${contentToText(latestUser?.content)}\n${options.recentText ?? ""}`;
   const projected = buildRoleplayContext(state, text, options);

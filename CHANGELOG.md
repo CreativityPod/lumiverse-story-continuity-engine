@@ -1,3 +1,11 @@
+# 1.3.0
+
+- First-time initialization posts a single system notice before generating initial character profiles and story state, then updates that message to ready or failed.
+- Retries and interrupted initialization reuse the notice. Ordinary updates and loading existing/imported state do not post new generation notices.
+- Notices stay outside narrative tracking, source selection, branch fingerprints and roleplay prompts, and are hidden from recall embeddings where supported.
+- Notice message events cannot trigger recursive tracker calls. Editing or deleting the notice preserves valid story checkpoints; notice I/O failures do not block tracking.
+- Canonical saves, setup formats and Date Simulator routing remain compatible.
+
 # 1.2.0
 
 - Initialization, routine tracking, imported profile refresh and roleplay injection use short typed entity aliases instead of persistent IDs/GUIDs.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cardSources, isSpecializedCard, prefixFingerprint, listEligibleTurns, transcriptContext, createStore, validCheckpointPrefix, injectContinuity, validateSetupFile, exportInitialSetup, IMPORT_LOADED_TEXT, SETUP_FORMAT } from "../src/state.js";
+import { cardSources, isSpecializedCard, prefixFingerprint, listEligibleTurns, transcriptContext, createStore, validCheckpointPrefix, injectContinuity, validateSetupFile, exportInitialSetup, IMPORT_LOADED_TEXT, SETUP_FORMAT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices } from "../src/state.js";
 import { remapStateSources } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState } from "./fixtures.js";
 
@@ -50,4 +50,32 @@ test("injection is idempotent, private and leaves the card prompt intact", () =>
   const second = injectContinuity(first.messages, fixtureState());
   assert.equal(second.messages.length, 3); assert.equal(second.messages[0].content, "Character voice");
   assert.ok(second.messages[1].content.includes("private canonical continuity")); assert.ok(second.messages[1].content.includes("Lantern Guild"));
+});
+
+test("initialization notices never become greetings, tracked turns, or fingerprinted story events", () => {
+  const notice = { id: "notice", role: "assistant", content: INITIALIZATION_NOTICE_TEXT.generating,
+    metadata: { story_continuity_notice: { version: 1, status: "generating" } } };
+  const messages = [{ id: "a0", role: "assistant", content: "Opening" }, { id: "u1", role: "user", content: "Hello" }, notice, { id: "a1", role: "assistant", content: "Reply" }];
+  const turns = listEligibleTurns(messages), fingerprint = prefixFingerprint(messages, 3);
+  assert.deepEqual(turns.map(turn => turn.assistant.id), ["a0", "a1"]); assert.equal(turns[1].user.id, "u1");
+  assert.equal(cardSources([CARD], [notice, ...messages]).selectedOpening, "Opening");
+  notice.content = "Storyteller v1.6.0"; notice.swipe_id = 2;
+  assert.equal(isSpecializedCard([CARD], messages), false); assert.equal(prefixFingerprint(messages, 3), fingerprint);
+  messages.splice(2, 1); assert.equal(prefixFingerprint(messages, 2), fingerprint);
+});
+
+test("prompt filtering recognizes notice metadata and host source identity while preserving other messages", () => {
+  const metadata = { story_continuity_notice: { version: 1, status: "ready" } };
+  const stored = [{ id: "n1", role: "system", content: INITIALIZATION_NOTICE_TEXT.ready, metadata }];
+  const keep = [{ role: "system", content: "Character voice" }, { role: "user", content: INITIALIZATION_NOTICE_TEXT.ready },
+    { role: "assistant", content: INITIALIZATION_NOTICE_TEXT.ready, sourceMessageId: "actual-story-message" }];
+  const remove = [{ role: "system", content: "Edited notice text", metadata },
+    { role: "assistant", content: "Edited notice text", extra: { spindle_metadata: metadata } },
+    { role: "assistant", content: "Edited notice text", sourceMessageMetadata: { spindle_metadata: metadata } },
+    { role: "assistant", content: "Edited notice text", sourceMessageId: "n1", __isChatHistory: true },
+    { role: "assistant", content: "Edited notice text", sourceIndexInChat: 0, __isChatHistory: true },
+    { role: "assistant", content: [{ type: "text", text: INITIALIZATION_NOTICE_TEXT.ready }] }];
+  assert.deepEqual(stripInitializationNotices([...keep, ...remove], stored), keep);
+  assert.equal(isInitializationNotice({ role: "user", content: "Hello", metadata }), false);
+  assert.equal(isInitializationNotice({ is_user: true, extra: { spindle_metadata: metadata } }), false);
 });

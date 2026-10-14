@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
-import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT } from "../src/state.js";
+import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns } from "../src/state.js";
 import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState, modelOutput } from "./fixtures.js";
 
 function harness() {
-  const files = new Map(), variables = new Map(), events = new Map(), sent = [], requests = [];
+  const files = new Map(), variables = new Map(), events = new Map(), sent = [], requests = [], noticeWrites = [];
   const messages = new Map([["chat", [{ id: "a0", role: "assistant", content: CARD.first_mes, swipe_id: 0 }]]]);
   const cards = new Map([["ada", structuredClone(CARD)]]), chats = new Map([["chat", { id: "chat", character_id: "ada", metadata: {} }]]);
-  let response = null;
+  let response = null, messageSequence = 0;
+  const emitNoticeEvent = async (name, chatId, message) => {
+    if (isInitializationNotice(message)) await events.get(name)?.({ chatId, message: { id: message.id, is_user: false, content: message.content, extra: { spindle_metadata: message.metadata } } }, "owner");
+  };
   const permissions = new Set(["generation", "interceptor", "chat_mutation", "characters", "chats", "ui_panels"]);
   const api = {
     permissions: { has: permission => permissions.has(permission), onChanged: () => {} },
@@ -19,8 +22,21 @@ function harness() {
     variables: { chat: { set: async (id, key, value) => variables.set(`${id}:${key}`, value) } },
     chats: { get: async id => structuredClone(chats.get(id) ?? null) }, characters: { get: async id => structuredClone(cards.get(id) ?? null) },
     chat: { getMessages: async id => { if (!messages.has(id)) throw new Error("Chat not found"); return structuredClone(messages.get(id)); },
-      appendMessage: async (id, message, options) => { const entry = { ...message, id: `appended-${messages.get(id).length}`, swipe_id: 0 }; messages.get(id).push(entry);
-        if (options?.generate) messages.get(id).push({ id: "begin-response", role: "assistant", content: "Ada waits at the station." }); return { id: entry.id }; } },
+      appendMessage: async (id, message, options) => { const entry = { ...message, id: `appended-${++messageSequence}`, swipe_id: 0 }; messages.get(id).push(entry);
+        if (isInitializationNotice(entry)) noticeWrites.push(structuredClone(entry));
+        await emitNoticeEvent("MESSAGE_SENT", id, entry);
+        if (options?.generate) messages.get(id).push({ id: "begin-response", role: "assistant", content: "Ada waits at the station." }); return { id: entry.id }; },
+      updateMessage: async (chatId, messageId, patch) => {
+        const entry = messages.get(chatId)?.find(message => message.id === messageId); if (!entry) throw new Error("Message not found");
+        if (patch.content !== undefined) entry.content = patch.content;
+        if (patch.metadata !== undefined) entry.metadata = structuredClone(patch.metadata);
+        if (isInitializationNotice(entry)) noticeWrites.push(structuredClone(entry));
+        await emitNoticeEvent("MESSAGE_EDITED", chatId, entry);
+      },
+      setMessageHidden: async (chatId, messageId, hidden) => {
+        const entry = messages.get(chatId)?.find(message => message.id === messageId); if (!entry) throw new Error("Message not found");
+        entry.extra = { ...entry.extra, hidden }; await emitNoticeEvent("MESSAGE_EDITED", chatId, entry);
+      } },
     connections: { list: async () => [{ id: "default", provider: "openai", is_default: true }], get: async () => null },
     generate: { quiet: async input => { requests.push(input); if (response) return response(input); const state = modelOutput(undefined, { initialize: input.messages[1].content.startsWith("INITIALIZE") });
       if (input.messages[1].content.includes("Coat removed")) state.characters[0].visible.dressAndLayers = "White shirt; blue coat on bench";
@@ -32,7 +48,7 @@ function harness() {
   const engine = createStoryEngine(api);
   const select = async (chatId = "chat") => engine.handleFrontend({ type: "story_get_status", chatId }, "owner");
   const addTurn = (text, id = "a1") => messages.get("chat").push({ id: `u-${id}`, role: "user", content: "Continue" }, { id, role: "assistant", content: text, swipe_id: 0 });
-  return { api, engine, files, variables, messages, cards, chats, events, sent, requests, permissions, select, addTurn, setResponse: handler => { response = handler; } };
+  return { api, engine, files, variables, messages, cards, chats, events, sent, requests, noticeWrites, permissions, select, addTurn, setResponse: handler => { response = handler; } };
 }
 
 test("generic card initializes automatically, preserves original setup and rechecks without generation", async () => {
@@ -96,7 +112,7 @@ test("specialized cards never initialize, mirror or inject competing generic sta
 test("fork inherits exactly the copied prefix and remaps source ids without replay", async () => {
   const h = harness(); await h.select(); h.addTurn("Coat removed."); await h.engine.schedule("chat", {}, "owner");
   h.addTurn("Door opened.", "a2"); await h.engine.schedule("chat", {}, "owner");
-  const copied = h.messages.get("chat").slice(0, 3), map = Object.fromEntries(copied.map(message => [message.id, `fork-${message.id}`]));
+  const copied = h.messages.get("chat").slice(0, h.messages.get("chat").findIndex(message => message.id === "a1") + 1), map = Object.fromEntries(copied.map(message => [message.id, `fork-${message.id}`]));
   h.messages.set("fork", copied.map(message => ({ ...message, id: map[message.id] }))); h.chats.set("fork", { id: "fork", character_id: "ada" });
   const requests = h.requests.length;
   await h.events.get("CHAT_FORKED")({ sourceChatId: "chat", forkedChatId: "fork", forkedAtMessageId: "a1", messageIdMap: map }, "owner");
@@ -105,7 +121,8 @@ test("fork inherits exactly the copied prefix and remaps source ids without repl
 });
 test("portable import validates before writing and recovers from its metadata anchor", async () => {
   const h = harness(); await h.select();
-  await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: "{}", requestId: "bad" }, "owner"); assert.equal(h.messages.get("chat").length, 1); assert.equal(h.sent.at(-1).payload.ok, false);
+  const messageCount = h.messages.get("chat").length;
+  await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: "{}", requestId: "bad" }, "owner"); assert.equal(h.messages.get("chat").length, messageCount); assert.equal(h.sent.at(-1).payload.ok, false);
   const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(fixtureState(), new Map(), "initial-setup") };
   const count = h.requests.length;
   await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup), requestId: "import" }, "owner");
@@ -192,4 +209,113 @@ test("GUID-backed saves inject only aliases and rejected alias typos cannot comm
   assert.deepEqual(failed.current, initial.current); assert.equal(failed.current.characters.length, 1);
   assert.equal(failed.revision, initial.revision);
   assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes(guid));
+});
+
+test("one visible notice precedes initialization and updates to ready without extra turns or calls", async () => {
+  const h = harness(); let release, started;
+  const gate = new Promise(resolve => { release = resolve; }), observed = new Promise(resolve => { started = resolve; });
+  h.setResponse(async () => { started(); await gate; return { content: JSON.stringify(modelOutput(undefined, { initialize: true })) }; });
+  const pending = h.select(); await observed;
+  const notice = h.messages.get("chat").find(isInitializationNotice);
+  assert.equal(notice.role, "system"); assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.generating); assert.equal(notice.extra.hidden, true);
+  assert.equal((await h.engine.loadStore("chat")).current, null);
+  release(); await pending;
+  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["generating", "ready"]);
+  assert.equal(h.noticeWrites[0].id, h.noticeWrites[1].id); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1);
+  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready); assert.equal(h.requests.length, 1);
+  assert.deepEqual(Object.keys((await h.engine.loadStore("chat")).checkpoints), ["a0::0"]);
+  assert.ok(!JSON.stringify(h.requests[0].messages).includes("Generating the initial character profiles"));
+  const count = h.noticeWrites.length;
+  h.setResponse(null); h.addTurn("Ada nods."); await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.noticeWrites.length, count); assert.equal(h.requests.length, 2);
+  assert.equal(listEligibleTurns(h.messages.get("chat")).length, 2);
+});
+
+test("failed initialization updates the same notice without disclosing tracker diagnostics and retry reuses it", async () => {
+  const h = harness(); h.setResponse(async () => { throw new Error("PRIVATE_DIAGNOSTIC_WITH_SECRET"); });
+  await h.select(); const notice = h.messages.get("chat").find(isInitializationNotice), id = notice.id;
+  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.failed); assert.ok(!notice.content.includes("PRIVATE_DIAGNOSTIC"));
+  assert.equal((await h.engine.loadStore("chat")).current, null);
+  h.setResponse(null); await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1); assert.equal(notice.id, id);
+  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready);
+  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["generating", "failed", "generating", "ready"]);
+});
+
+test("notice edits and deletion do not invalidate checkpoints or reset the opening", async () => {
+  const h = harness(); await h.select(); h.addTurn("Ada nods."); await h.engine.schedule("chat", {}, "owner");
+  const notice = h.messages.get("chat").find(isInitializationNotice), before = await h.engine.loadStore("chat"), calls = h.requests.length;
+  notice.content = "Storyteller v1.6.0 — edited administrative status"; notice.swipe_id = 2;
+  await h.events.get("MESSAGE_EDITED")({ chatId: "chat", message: notice }, "owner");
+  await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, calls); assert.equal((await h.engine.loadStore("chat")).blocked, "");
+  h.messages.set("chat", h.messages.get("chat").filter(message => message.id !== notice.id));
+  await h.events.get("MESSAGE_DELETED")({ chatId: "chat", messageId: notice.id }, "owner");
+  await h.engine.schedule("chat", {}, "owner");
+  const after = await h.engine.loadStore("chat");
+  assert.equal(h.requests.length, calls); assert.equal(after.revision, before.revision); assert.deepEqual(after.checkpoints, before.checkpoints);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+});
+
+test("deleting the notice during a tracker call keeps valid story output and does not recreate it", async () => {
+  const h = harness(); await h.select(); h.addTurn("Coat removed.");
+  h.setResponse(async () => {
+    const notice = h.messages.get("chat").find(isInitializationNotice);
+    h.messages.set("chat", h.messages.get("chat").filter(message => message.id !== notice.id));
+    return { content: JSON.stringify(modelOutput()) };
+  });
+  await h.engine.schedule("chat", {}, "owner");
+  const store = await h.engine.loadStore("chat");
+  assert.equal(store.lastError, ""); assert.ok(store.checkpoints["a1::0"]); assert.equal(h.requests.length, 2);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+});
+
+test("notice history is stripped from prompts even when initialization failed or tracking is disabled", async () => {
+  const h = harness(); await h.select();
+  const notice = h.messages.get("chat").find(isInitializationNotice);
+  const prompt = [{ role: "system", content: "Character voice" },
+    { role: "assistant", content: "Older notice text", sourceMessageId: notice.id, __isChatHistory: true },
+    { role: "user", content: "Continue" }];
+  const active = await h.engine.intercept(prompt, { chatId: "chat", userId: "owner" });
+  assert.equal(active.messages.length, 3); assert.equal(active.messages[0].content, "Character voice");
+  assert.ok(!active.messages.some(message => message.sourceMessageId === notice.id));
+  h.files.set("config.json", { enabled: false });
+  assert.deepEqual(await h.engine.intercept(prompt, { chatId: "chat", userId: "owner" }), [prompt[0], prompt[2]]);
+  const failed = harness(); failed.setResponse(async () => ({ content: "invalid" })); await failed.select();
+  const failedNotice = failed.messages.get("chat").find(isInitializationNotice);
+  const result = await failed.engine.intercept([{ role: "assistant", content: failedNotice.content, sourceMessageId: failedNotice.id }, prompt[2]], { chatId: "chat", userId: "owner" });
+  assert.deepEqual(result, [prompt[2]]); assert.equal((await failed.engine.loadStore("chat")).current, null);
+});
+
+test("a restarted worker finishes an interrupted notice without regenerating an already committed baseline", async () => {
+  const h = harness(); await h.select();
+  const notice = h.messages.get("chat").find(isInitializationNotice), count = h.requests.length;
+  notice.metadata.story_continuity_notice.status = "generating"; notice.content = INITIALIZATION_NOTICE_TEXT.generating;
+  const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
+  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready); assert.equal(h.requests.length, count);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1);
+});
+
+test("specialized, disabled and imported chats do not post generation notices", async () => {
+  const specialized = harness(); specialized.cards.get("ada").description = "Date Simulator v1.5.7"; await specialized.select();
+  assert.equal(specialized.messages.get("chat").filter(isInitializationNotice).length, 0);
+  const disabled = harness(); disabled.files.set("config.json", { enabled: false }); await disabled.select();
+  assert.equal(disabled.messages.get("chat").filter(isInitializationNotice).length, 0);
+  const denied = harness(); denied.permissions.delete("generation"); await denied.select();
+  assert.equal(denied.messages.get("chat").filter(isInitializationNotice).length, 0);
+  const imported = harness(), setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(fixtureState(), new Map(), "initial-setup") };
+  await imported.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup) }, "owner");
+  assert.equal(imported.sent.at(-1).payload.ok, true); assert.equal(imported.requests.length, 0);
+  assert.equal(imported.messages.get("chat").filter(isInitializationNotice).length, 0);
+});
+
+test("notice write failures do not discard canonical state and a later recheck completes the notice", async () => {
+  const absent = harness(); absent.api.chat.appendMessage = async () => { throw new Error("Notice service unavailable"); };
+  await absent.select(); assert.ok((await absent.engine.loadStore("chat")).current); assert.equal(absent.requests.length, 1);
+  const h = harness(), update = h.api.chat.updateMessage;
+  h.api.chat.updateMessage = async () => { throw new Error("Notice edit unavailable"); };
+  await h.select(); assert.ok((await h.engine.loadStore("chat")).current);
+  const notice = h.messages.get("chat").find(isInitializationNotice); assert.equal(notice.metadata.story_continuity_notice.status, "generating");
+  h.api.chat.updateMessage = update; await h.engine.schedule("chat", {}, "owner");
+  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready); assert.equal(h.requests.length, 1);
 });

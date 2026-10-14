@@ -17,6 +17,7 @@ assert.ok(backend.includes("story_continuity.state_v1"));
 assert.ok(backend.includes("story_continuity.state_v2"));
 assert.ok(backend.includes("buildRoutineTrackerContext") && backend.includes("buildRoleplayContext"));
 assert.ok(backend.includes("createAliasRegistry") && backend.includes("decodeModelOutput") && backend.includes("aliasOutputSchema"));
+assert.ok(backend.includes("writeInitializationNotice") && backend.includes("stripInitializationNotices") && backend.includes("story_continuity_notice"));
 assert.ok(!backend.includes("use exactly char:<card id>"));
 assert.ok(!backend.includes("STABLE CARD SOURCES\\n"));
 assert.ok(!backend.includes('date_simulator.scene_v2'));

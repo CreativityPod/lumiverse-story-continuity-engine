@@ -1,10 +1,10 @@
 # Story Continuity Engine
 
-Persistent character and world state for any character card. Version **1.2.0** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
+Persistent character and world state for any character card. Version **1.3.0** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
 
 ## Install
 
-1. Extract `release/Story_Continuity_Engine_v1.2.0.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
+1. Extract `release/Story_Continuity_Engine_v1.3.0.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
 2. Grant **generation**, **interceptor**, **chat_mutation**, **characters**, and **chats**. These support quiet tracker calls, prompt injection, chat-variable mirrors, and card/chat reads. Grant **world_books** to include enabled constant entries from attached lorebooks and **ui_panels** for the floating widget. This extension does not modify character cards or lorebooks.
 3. Open an ordinary character chat, then open **Story Continuity** in the Spindle drawer. Initialization is automatic. A new chat is recommended for the first run.
 4. Optionally select a tracker connection and structured-output mode, then select **Save Settings**. Without a selection, the host's default connection is used.
@@ -16,6 +16,10 @@ Built entries are included; installation does not require npm or the development
 The engine reads each card in the chat or group: name, description, personality, scenario, example dialogue, creator notes, and the actual selected opening. The selected opening takes priority over the default greeting. Unselected alternate greetings and system/post-history instructions are not turned into story facts. Example dialogue and creator notes are guidance, not completed history.
 
 A quiet LLM call extracts a structured baseline. Complete bounded card source text is saved alongside the extracted state. The original card remains the host's characterization source. The engine separates stable profiles and appearance from current visible and internal state, keeps recurring identities persistent, and leaves missing facts as `Unknown`.
+
+Before the first extraction call, a **Story Continuity Engine** system message appears near the beginning of the chat: “Generating the initial character profiles and starting story state… Please wait.” The same message updates to “Initial profiles and story state are ready.” when initialization completes, or a generic failure notice directing you to the drawer. It never displays profiles, secrets or raw error details. Retries reuse the existing notice, and ordinary turn updates do not post additional messages. Previously initialized chats and imported setups do not get a new generation notice solely from upgrading or loading saved state.
+
+The notice stays visible to the user but is excluded from story tracking, branch fingerprints and outgoing roleplay prompts. The engine also sets Lumiverse's hidden-from-recall flag where supported to exclude the row from memory embeddings; that flag alone does not remove linear prompt history, so the interceptor filters it separately. Deleting the notice does not invalidate saved continuity or make the engine repost it during routine updates. Notice write errors do not prevent tracking.
 
 After each eligible completed assistant turn, the engine supplies the extracted stable profiles inside the relevant previous state, a compact identity catalog, and that interaction to the tracker. Original cards are sent in full during initialization and explicit profile refresh. Routine updates consult the frozen sources locally and include only relevant reference excerpts for facts missing from the extracted profiles. Guidance, example dialogue and the original opening are excluded from factual lookup excerpts. Current story changes take precedence over starting conditions.
 
@@ -83,6 +87,6 @@ npm run check
 npm run package
 ```
 
-`npm run check` builds both entries, runs schema/alias/state/context/tracker/backend/DOM tests, and validates the package. Tests cover GUID-free model context, identity round trips, backend ID allocation, alias typos and repair, cross-reference validation, all provider modes, routine payload reduction, targeted lookup, relevance selection and budgets, omitted-entity preservation, v1 migration, malformed output, privacy projection, user control, edits/swipes, stale results, forks, metadata import recovery, frozen exports, Home navigation, cleanup confirmation, and native/fallback drawer controls.
+`npm run check` builds both entries, runs schema/alias/state/context/tracker/backend/DOM tests, and validates the package. Tests cover initialization notices and event-loop suppression, failed initialization/retry, prompt exclusion, notice deletion and restart recovery, GUID-free model context, identity round trips, backend ID allocation, alias typos and repair, cross-reference validation, all provider modes, routine payload reduction, targeted lookup, relevance selection and budgets, omitted-entity preservation, v1 migration, malformed output, privacy projection, user control, edits/swipes, stale results, forks, metadata import recovery, frozen exports, Home navigation, cleanup confirmation, and native/fallback drawer controls.
 
 For a standalone visual preview, serve this directory locally and open `test/browser-preview.html`. It uses the actual frontend with fixture data and does not access Lumiverse or make model calls. The drawer has been inspected in dark and light themes. Live provider behavior and an installed Lumiverse session still require an integration run.
