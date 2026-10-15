@@ -47,8 +47,8 @@ export function setup(ctx) {
     .sce-widget[data-state="attention"]{--sce-widget-status:#f43f5e}.sce-widget[data-state="attention"]:after{content:"!";display:grid;place-items:center;width:14px;height:14px;color:#fff;font:700 9px/1 system-ui}
     @keyframes sce-pulse{50%{opacity:.45}}@media(prefers-reduced-motion:reduce){.sce-widget{transition:none!important}.sce-widget:after{animation:none!important}}
     .sce-panel [hidden]{display:none!important}
-    .sce-inline-setup{display:grid;gap:12px;padding:12px 0}.sce-inline-setup .sce-actions{align-items:start;gap:16px}.sce-inline-setup .sce-button{white-space:normal}
-    .sce-setup-choice{display:grid;gap:6px;flex:1 1 200px}.sce-setup-choice .sce-button{justify-self:start}
+    .sce-inline-setup{display:grid;gap:12px;margin-top:14px;padding:16px 0 4px;border-top:1px solid var(--lumiverse-border)}.sce-inline-setup .sce-actions{align-items:start;gap:16px}.sce-inline-setup .sce-button{white-space:normal}
+    .sce-setup-choice{display:grid;gap:6px;flex:1 1 200px;justify-items:center;text-align:center}.sce-setup-choice .sce-button{justify-self:center}.sce-setup-choice .sce-hint{max-width:27ch}
   `);
   cleanups.push(removeStyle);
   const tab = ctx.ui.registerDrawerTab({ id: "story-continuity", title: "Story Continuity Engine", shortName: "Story Continuity", headerTitle: "Story Continuity",
@@ -178,7 +178,9 @@ export function setup(ctx) {
     reprocess.disabled = refreshCards.disabled = !activeChatId || !latestStatus?.snapshot || latestStatus.processing || generationBusy;
     if (inlineSetup) {
       inlineSetup.create.disabled = createButton.disabled; inlineSetup.import.disabled = importButton.disabled;
-      inlineSetup.feedback.textContent = startupFeedback || (latestStatus?.canCreate && !latestStatus.canImport ? "To import, open a fresh chat before sending a message." : "");
+      inlineSetup.feedback.textContent = startupFeedback || (latestStatus?.processing ? "Preparing profiles and starting state…"
+        : latestStatus?.code === "degraded" ? "Setup failed. Try again or open Story Continuity for details."
+        : latestStatus?.canCreate && !latestStatus.canImport ? "To import, open a fresh chat before sending a message." : "");
     }
   }
   function clearSetupChoices() {
@@ -188,11 +190,11 @@ export function setup(ctx) {
   }
   function renderSetupChoices() {
     const status = latestStatus;
-    if (!status?.setupNoticeId || status.snapshot || ["idle", "disabled", "specialized", "permissions"].includes(status.code)) { clearSetupChoices(); return; }
-    if (inlineSetup?.messageId === status.setupNoticeId && inlineSetup.chatId === activeChatId) { updateButtons(); return; }
+    if (!status?.setupTargetMessageId || status.snapshot || ["idle", "disabled", "specialized", "permissions"].includes(status.code)) { clearSetupChoices(); return; }
+    if (inlineSetup?.messageId === status.setupTargetMessageId && inlineSetup.chatId === activeChatId) { updateButtons(); return; }
     clearSetupChoices();
     if (typeof ctx.dom.findMessageElement !== "function" || typeof ctx.dom.inject !== "function") return;
-    const bubble = ctx.dom.findMessageElement(status.setupNoticeId);
+    const bubble = ctx.dom.findMessageElement(status.setupTargetMessageId);
     if (!bubble) return;
     const wrapper = ctx.dom.inject(bubble, '<div class="sce-inline-setup" role="group" aria-label="Story setup choices"></div>', "beforeend");
     const root = wrapper.querySelector(".sce-inline-setup"), actions = element("div", "sce-actions"), hint = element("div", "sce-hint");
@@ -203,9 +205,9 @@ export function setup(ctx) {
       const control = button(container, label, action, primary); control.setAttribute("aria-describedby", help.id);
       container.append(help); actions.append(container); return control;
     };
-    inlineSetup = { wrapper, messageId: status.setupNoticeId, chatId: activeChatId,
-      import: choice("Import Saved Setup", "Restore profiles and the starting scene from an exported setup JSON file. Use a fresh chat before sending a message.", chooseImport),
-      create: choice("Create From Character Card", "Build new profiles and a starting state from this chat's character card and selected opening.", createFromCard, true), feedback: hint };
+    inlineSetup = { wrapper, messageId: status.setupTargetMessageId, chatId: activeChatId,
+      import: choice("Import Saved Setup", "Load saved profiles and starting scene.", chooseImport, true),
+      create: choice("Create From Character Card", "Build profiles and scene from this card.", createFromCard, true), feedback: hint };
     updateButtons();
   }
   function renderSnapshot(snapshot) {
@@ -309,7 +311,7 @@ export function setup(ctx) {
   cleanups.push(ctx.events.on("CHAT_SWITCHED", payload => changeChat(typeof payload?.chatId === "string" ? payload.chatId : null)));
   for (const name of ["GENERATION_STARTED", "GENERATION_ENDED", "GENERATION_STOPPED"]) cleanups.push(ctx.events.on(name, payload => { if (payload?.chatId === activeChatId) { generationBusy = name === "GENERATION_STARTED"; updateButtons(); } }));
   for (const name of ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED"]) cleanups.push(ctx.events.on(name, payload => { if (activeChatId && payload?.chatId === activeChatId) requestStatus(); }));
-  for (const name of ["CHARACTER_MESSAGE_RENDERED", "USER_MESSAGE_RENDERED"]) cleanups.push(ctx.events.on(name, payload => { if (payload?.chatId === activeChatId && payload.messageId === latestStatus?.setupNoticeId) renderSetupChoices(); }));
+  for (const name of ["CHARACTER_MESSAGE_RENDERED", "USER_MESSAGE_RENDERED"]) cleanups.push(ctx.events.on(name, payload => { if (payload?.chatId === activeChatId && payload.messageId === latestStatus?.setupTargetMessageId) renderSetupChoices(); }));
   cleanups.push(tab.onActivate(requestStatus));
   ctx.ready();
   try { if (typeof ctx.getActiveChat === "function") changeChat(ctx.getActiveChat()?.chatId ?? null); else requestStatus(); } catch { requestStatus(); }

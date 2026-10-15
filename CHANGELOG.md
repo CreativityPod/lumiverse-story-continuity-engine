@@ -1,3 +1,9 @@
+# 1.4.4
+
+- Setup controls attach directly beneath the narrative opening; no hidden placeholder, progress, error or completion notice is posted. Legacy notices are removed even while awaiting setup.
+- Import and Create use matching primary buttons, centered above shorter descriptions. Controls disappear on success while the opening stays intact.
+- Chats without an opening retain drawer setup; progress, cancellation, retries, navigation and virtualized opening rendering remain supported.
+
 # 1.4.3
 
 - Startup buttons include short instructions explaining saved setup import and creation from the card/selected opening.

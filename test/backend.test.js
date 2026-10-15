@@ -273,18 +273,18 @@ test("GUID-backed saves inject only aliases and rejected alias typos cannot comm
   assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes(guid));
 });
 
-test("the temporary setup panel is deleted after initialization without a completion message", async () => {
+test("setup targets the opening and initialization writes no setup or completion messages", async () => {
   const h = harness(); let release, started;
+  const original = structuredClone(h.messages.get("chat")); await h.open();
+  assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, "a0");
   const gate = new Promise(resolve => { release = resolve; }), observed = new Promise(resolve => { started = resolve; });
   h.setResponse(async () => { started(); await gate; return { content: JSON.stringify(modelOutput(undefined, { initialize: true })) }; });
   const pending = h.select(); await observed;
-  const notice = h.messages.get("chat").find(isInitializationNotice);
-  assert.equal(notice.role, "system"); assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.generating); assert.equal(notice.extra.hidden, true);
+  assert.deepEqual(h.messages.get("chat"), original);
   assert.equal((await h.engine.loadStore("chat")).current, null);
   release(); await pending;
-  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "generating"]);
-  assert.equal(h.noticeWrites[0].id, h.noticeDeletes[0].id); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
-  assert.equal((await h.engine.status("chat", "owner")).setupNoticeId, null); assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.noticeWrites, []); assert.deepEqual(h.noticeDeletes, []); assert.deepEqual(h.messages.get("chat"), original);
+  assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, null); assert.equal(h.requests.length, 1);
   assert.deepEqual(Object.keys((await h.engine.loadStore("chat")).checkpoints), ["a0::0"]);
   assert.ok(!JSON.stringify(h.requests[0].messages).includes("Generating the initial character profiles"));
   const count = h.noticeWrites.length;
@@ -293,14 +293,15 @@ test("the temporary setup panel is deleted after initialization without a comple
   assert.equal(listEligibleTurns(h.messages.get("chat")).length, 2);
 });
 
-test("failed initialization updates the same notice without disclosing tracker diagnostics and retry reuses it", async () => {
+test("failed initialization keeps the opening target available for retry without posting diagnostics", async () => {
   const h = harness(); h.setResponse(async () => { throw new Error("PRIVATE_DIAGNOSTIC_WITH_SECRET"); });
-  await h.select(); const notice = h.messages.get("chat").find(isInitializationNotice), id = notice.id;
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.failed); assert.ok(!notice.content.includes("PRIVATE_DIAGNOSTIC"));
+  const original = structuredClone(h.messages.get("chat")); await h.select();
+  assert.deepEqual(h.messages.get("chat"), original);
+  assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, "a0");
   assert.equal((await h.engine.loadStore("chat")).current, null);
   h.setResponse(null); await h.engine.schedule("chat", {}, "owner");
-  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(h.noticeDeletes[0].id, id);
-  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "generating", "failed", "generating"]);
+  assert.deepEqual(h.messages.get("chat"), original); assert.deepEqual(h.noticeWrites, []);
+  assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, null);
 });
 
 test("a committed profile retires setup controls even when later history tracking fails", async () => {
@@ -310,7 +311,7 @@ test("a committed profile retires setup controls even when later history trackin
   await h.create(); const store = await h.engine.loadStore("chat");
   assert.ok(store.baseline); assert.ok(store.current); assert.ok(store.lastError);
   assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
-  assert.equal(store.setupNoticeId, null);
+  assert.equal(store.setupTargetMessageId, null);
 });
 
 test("notice edits and deletion do not invalidate checkpoints or reset the opening", async () => {
@@ -343,7 +344,7 @@ test("deleting the notice during a tracker call keeps valid story output and doe
 
 test("notice history is stripped from prompts even when initialization failed or tracking is disabled", async () => {
   const h = harness(); await h.select();
-  const notice = h.noticeDeletes[0];
+  const notice = addLegacyNotice(h); await h.engine.schedule("chat", {}, "owner");
   const prompt = [{ role: "system", content: "Character voice" },
     { role: "assistant", content: "Older notice text", sourceMessageId: notice.id, __isChatHistory: true },
     { role: "user", content: "Continue" }];
@@ -353,7 +354,7 @@ test("notice history is stripped from prompts even when initialization failed or
   h.files.set("config.json", { enabled: false });
   assert.deepEqual(await h.engine.intercept(prompt, { chatId: "chat", userId: "owner" }), [prompt[0], prompt[2]]);
   const failed = harness(); failed.setResponse(async () => ({ content: "invalid" })); await failed.select();
-  const failedNotice = failed.messages.get("chat").find(isInitializationNotice);
+  const failedNotice = addLegacyNotice(failed, "failed");
   const result = await failed.engine.intercept([{ role: "assistant", content: failedNotice.content, sourceMessageId: failedNotice.id }, prompt[2]], { chatId: "chat", userId: "owner" });
   assert.deepEqual(result, [prompt[2]]); assert.equal((await failed.engine.loadStore("chat")).current, null);
 });
@@ -384,16 +385,16 @@ test("specialized, disabled and imported chats do not post generation notices", 
   assert.equal(imported.messages.get("chat").filter(isInitializationNotice).length, 0);
 });
 
-test("setup panel I/O failures preserve saved state and removal retries without generation", async () => {
+test("setup needs no chat writes and legacy removal failures retry without generation", async () => {
   const absent = harness(); absent.api.chat.appendMessage = async () => { throw new Error("Notice service unavailable"); };
   await absent.select(); assert.ok((await absent.engine.loadStore("chat")).current); assert.equal(absent.requests.length, 1);
   const h = harness();
   h.api.chat.updateMessage = async () => { throw new Error("Notice edit unavailable"); };
   await h.select(); assert.ok((await h.engine.loadStore("chat")).current);
   assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
-  const retry = harness(), remove = retry.api.chat.deleteMessage;
+  const retry = harness(); await retry.select(); addLegacyNotice(retry); const remove = retry.api.chat.deleteMessage;
   retry.api.chat.deleteMessage = async () => { throw new Error("Notice deletion unavailable"); };
-  await retry.select(); const before = await retry.engine.loadStore("chat");
+  await retry.open(); const before = await retry.engine.loadStore("chat");
   assert.ok(before.current); assert.equal(retry.messages.get("chat").filter(isInitializationNotice).length, 1);
   retry.api.chat.deleteMessage = remove; await retry.engine.schedule("chat", {}, "owner");
   assert.equal(retry.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(retry.requests.length, 1);
@@ -405,19 +406,29 @@ test("fresh chats wait for an explicit setup choice across events, prompt interc
   let store = await h.engine.loadStore("chat"), status = await h.engine.status("chat", "owner");
   assert.equal(store.awaitingSetup, true); assert.equal(store.current, null); assert.equal(h.requests.length, 0);
   assert.equal(status.code, "setup"); assert.equal(status.canCreate, true); assert.equal(status.canImport, true);
-  const notice = h.messages.get("chat").find(isInitializationNotice); assert.equal(status.setupNoticeId, notice.id);
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.choice);
+  assert.equal(status.setupTargetMessageId, "a0");
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
   await h.events.get("MESSAGE_SENT")({ chatId: "chat" }, "owner");
   await h.open(); await h.engine.schedule("chat", { reprocess: true }, "owner");
-  const prompt = [{ role: "assistant", content: notice.content, sourceMessageId: notice.id }, { role: "user", content: "Continue" }];
-  assert.deepEqual(await h.engine.intercept(prompt, { chatId: "chat", userId: "owner" }), [prompt[1]]);
+  const prompt = [{ role: "assistant", content: CARD.first_mes, sourceMessageId: "a0" }, { role: "user", content: "Continue" }];
+  assert.deepEqual(await h.engine.intercept(prompt, { chatId: "chat", userId: "owner" }), prompt);
   const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
-  assert.equal(h.requests.length, 0); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1);
+  assert.equal(h.requests.length, 0); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+  assert.equal((await restarted.status("chat", "owner")).setupTargetMessageId, "a0");
   await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "choose" }, "owner");
   store = await restarted.loadStore("chat"); assert.ok(store.current); assert.equal(store.awaitingSetup, false); assert.equal(h.requests.length, 1);
-  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(store.setupNoticeId, null);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(store.setupTargetMessageId, null);
   await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "repeat" }, "owner");
   assert.equal(h.requests.length, 1);
+});
+
+test("pending legacy choice messages are removed and their controls move to the real opening", async () => {
+  const h = harness(); await h.open(); addLegacyNotice(h, "choice");
+  const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
+  const status = await restarted.status("chat", "owner");
+  assert.equal(status.awaitingSetup, true); assert.equal(status.setupTargetMessageId, "a0");
+  assert.equal(h.requests.length, 0); assert.deepEqual(h.noticeWrites, []);
+  assert.deepEqual(h.messages.get("chat").map(message => message.id), ["a0"]);
 });
 
 test("importing from the startup choice restores locally without an unused extraction call", async () => {
@@ -429,7 +440,7 @@ test("importing from the startup choice restores locally without an unused extra
   const store = await h.engine.loadStore("chat"), status = await h.engine.status("chat", "owner");
   assert.equal(store.current.world.weather, "Clear skies"); assert.equal(store.awaitingSetup, false);
   assert.equal(status.canCreate, false); assert.equal(status.canBegin, true);
-  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice"]);
+  assert.deepEqual(h.noticeWrites, []);
   assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
   const anchor = h.messages.get("chat").find(message => message.metadata?.story_continuity_setup);
   assert.ok(anchor); assert.ok(!h.noticeDeletes.some(message => message.id === anchor.id));
@@ -444,7 +455,7 @@ test("invalid imports leave the startup choices usable without generating a prof
   assert.equal(h.sent.at(-1).payload.ok, false); await h.open();
   const status = await h.engine.status("chat", "owner");
   assert.equal(status.canCreate, true); assert.equal(status.canImport, true); assert.equal(h.requests.length, 0);
-  assert.equal(h.messages.get("chat").find(isInitializationNotice).content, INITIALIZATION_NOTICE_TEXT.choice);
+  assert.equal(status.setupTargetMessageId, "a0"); assert.deepEqual(h.noticeWrites, []);
 });
 
 test("user turns do not silently choose creation and import is limited to a fresh chat", async () => {
@@ -454,11 +465,12 @@ test("user turns do not silently choose creation and import is limited to a fres
   await h.create(); assert.equal(h.requests.length, 2); assert.ok((await h.engine.loadStore("chat")).checkpoints["a1::0"]);
 });
 
-test("deleted choice notices stay deleted while drawer creation remains available", async () => {
+test("chats without an opening use drawer setup without creating a placeholder message", async () => {
   const h = harness(); await h.open();
-  h.messages.set("chat", h.messages.get("chat").filter(message => !isInitializationNotice(message)));
+  h.messages.set("chat", []);
   await h.open(); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
   assert.equal((await h.engine.status("chat", "owner")).canCreate, true);
+  assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, null);
   await h.create(); assert.ok((await h.engine.loadStore("chat")).current);
   assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
 });

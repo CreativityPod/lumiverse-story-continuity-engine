@@ -1,5 +1,5 @@
 import { validateState, publicTrackerSnapshot, remapStateSources, legacyTrackerState } from "./schemas.js";
-import { CHAT_KEYS, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
+import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
 import { DEFAULT_CONFIG, normalizeConfig, runTracker } from "./tracker.js";
@@ -75,7 +75,7 @@ export function createStoryEngine(api) {
       canBegin: Boolean(store?.canBegin && !busy && !generating.has(chatId)),
       canImport: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.importable && !store?.blocked),
       canCreate: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.sources && !store.baseline && !store.blocked && !store.epoch.startsWith("import:")),
-      awaitingSetup: Boolean(store?.awaitingSetup), setupNoticeId: store?.setupNoticeId ?? null,
+      awaitingSetup: Boolean(store?.awaitingSetup), setupTargetMessageId: store?.setupTargetMessageId ?? null,
       privateStateIncluded: includePrivate };
     if (includePrivate && store && !store.blocked) payload.privateState = store.current;
     return payload;
@@ -98,37 +98,6 @@ export function createStoryEngine(api) {
     for (const message of messages) if (isInitializationNotice(message)) ids.add(String(message.id));
     noticeIds.set(chatId, ids);
   }
-  async function writeInitializationNotice(chatId, notice, phase, create = false) {
-    if (deleted.has(chatId)) return null;
-    try {
-      const content = INITIALIZATION_NOTICE_TEXT[phase];
-      if (notice) {
-        // Respect a user deleting the notice while the tracker is running.
-        const latest = await api.chat.getMessages(chatId);
-        notice = latest.find(message => message.id === notice.id && isInitializationNotice(message));
-        if (!notice) return null;
-        rememberNotices(chatId, [notice]);
-        if (notice.content !== content || notice.metadata?.story_continuity_notice?.status !== phase) {
-          const metadata = { ...notice.metadata, story_continuity_notice: { version: 1, status: phase } };
-          await api.chat.updateMessage(chatId, notice.id, { content, metadata, skipChunkRebuild: true });
-          notice = { ...notice, content, metadata };
-        }
-      } else if (create) {
-        const metadata = { story_continuity_notice: { version: 1, status: phase } };
-        const result = await api.chat.appendMessage(chatId, { role: "system", content, metadata });
-        notice = { id: result.id, role: "system", content, metadata };
-        rememberNotices(chatId, [notice]);
-      }
-      // Lumiverse's hidden flag excludes recall embeddings; the interceptor
-      // separately removes the still-visible status row from linear history.
-      if (notice && notice.extra?.hidden !== true && api.chat.setMessageHidden) await api.chat.setMessageHidden(chatId, notice.id, true);
-    } catch {
-      // A status-message failure must not prevent canonical tracking.
-      api.log.warn("Story continuity initialization notice could not be updated.");
-    }
-    return notice;
-  }
-
   async function removeInitializationNotices(store) {
     if (deleted.has(store.chatId)) return;
     try {
@@ -144,7 +113,7 @@ export function createStoryEngine(api) {
       store.setupNoticeId = null;
       await saveStore(store);
     } catch {
-      // The committed profile is authoritative; retry UI cleanup on a later check.
+      // Legacy notices have no setup authority; retry cleanup on a later check.
       api.log.warn("Story continuity setup panel could not be removed.");
     }
   }
@@ -156,19 +125,17 @@ export function createStoryEngine(api) {
     let store = await loadStore(chatId);
     processing.add(chatId);
     const deadline = Date.now() + 240000;
-    let initializationNotice = null, finishNotice = false, trackerAttempt = null;
+    let initializationNotice = null, trackerAttempt = null;
     try {
       const messages = await api.chat.getMessages(chatId);
       rememberNotices(chatId, messages);
       initializationNotice = messages.find(isInitializationNotice) ?? null;
       if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; }
       else store.setupNoticeId = null;
-      finishNotice = initializationNotice?.metadata?.story_continuity_notice?.status === "generating";
       const { cards, sources } = await getSources(chatId, messages, userId);
       if (isSpecializedCard(cards, messages)) {
-        finishNotice = false;
         store.blocked = "This Date Simulator/Storyteller chat belongs to Date Simulator Continuity Engine.";
-        store.current = null; store.lastError = "";
+        store.current = null; store.lastError = ""; store.setupTargetMessageId = null;
         await saveStore(store); await mirror(store); return;
       }
       store.blocked = "";
@@ -208,12 +175,12 @@ export function createStoryEngine(api) {
       }
       store.importable = !context.anchor && !messages.some(message => message.role === "user");
       store.canBegin = Boolean(context.anchor && !turns.length && !messages.some(message => message.role === "user" && /^\/story-begin\b/.test(contentToText(message.content))));
-      if (store.baseline && initializationNotice?.metadata?.story_continuity_notice?.status === "choice") finishNotice = true;
+      const narrative = messages.filter(message => ["assistant", "user"].includes(message.role) && !isInitializationNotice(message)
+        && !message.metadata?.story_continuity_setup && contentToText(message.content).trim());
+      // The opening is only a DOM target: setup controls never become chat content.
+      store.setupTargetMessageId = store.baseline ? null : (narrative.find(message => message.role === "assistant") ?? narrative[0])?.id ?? null;
       if (!store.baseline && store.initializationMode !== "create") {
-        finishNotice = false;
         store.awaitingSetup = true; store.current = null;
-        initializationNotice = await writeInitializationNotice(chatId, initializationNotice, "choice", !store.setupNoticeShown);
-        if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; }
         await saveStore(store); await mirror(store);
         return;
       }
@@ -229,15 +196,12 @@ export function createStoryEngine(api) {
       await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
-        initializationNotice = await writeInitializationNotice(chatId, initializationNotice, "generating", !store.setupNoticeShown);
-        if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; await saveStore(store); }
-        finishNotice = Boolean(initializationNotice);
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
         const freshMessages = await api.chat.getMessages(chatId);
         const fresh = await getSources(chatId, freshMessages, userId);
         if (fingerprint(fresh.sources) !== currentFingerprint || deleted.has(chatId)) throw new Error("Card or opening changed during initialization; retry on the selected state.");
-        store.baseline = baseline; store.current = baseline; commitRevision(store);
+        store.baseline = baseline; store.current = baseline; store.setupTargetMessageId = null; commitRevision(store);
         await saveStore(store); await mirror(store);
       }
       let previousState = prefix.previousState ?? store.baseline;
@@ -277,8 +241,7 @@ export function createStoryEngine(api) {
       await saveStore(store);
       api.log.warn(`Story continuity update failed: ${store.lastError}`);
     } finally {
-      if (initializationNotice && store.baseline && !store.blocked) await removeInitializationNotices(store);
-      else if (finishNotice) await writeInitializationNotice(chatId, initializationNotice, "failed");
+      if (initializationNotice) await removeInitializationNotices(store);
       processing.delete(chatId); await publish(chatId, userId, options.includePrivate);
     }
   }

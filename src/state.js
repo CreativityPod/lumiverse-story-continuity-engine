@@ -6,6 +6,7 @@ export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the St
 export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v1" });
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
+// Setup controls are UI only; legacy notices remain recognized for cleanup/filtering.
 export const INITIALIZATION_NOTICE_TEXT = Object.freeze({
   choice: "**Story Continuity Engine**\n\nChoose how to prepare the profiles and starting state for this chat. These setup choices disappear once your setup is ready.",
   generating: "**Story Continuity Engine**\n\nGenerating the initial character profiles and starting story state… Please wait.",
@@ -103,7 +104,7 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
     initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    initializationMode: "", awaitingSetup: false, setupNoticeId: null, setupNoticeShown: false };
+    initializationMode: "", awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
 export function normalizeStore(value, chatId) {

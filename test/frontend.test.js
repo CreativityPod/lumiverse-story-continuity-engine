@@ -94,27 +94,30 @@ test("import picker runs directly from a click and cancel creates no import requ
 
 function showStartup(h, overrides = {}) {
   h.status({ code: "setup", level: "amber", text: "Choose Import Saved Setup or Create From Character Card.", revision: 0,
-    snapshot: null, canCreate: true, canImport: true, canExport: false, awaitingSetup: true, setupNoticeId: "notice", ...overrides });
+    snapshot: null, canCreate: true, canImport: true, canExport: false, awaitingSetup: true, setupTargetMessageId: "opening", ...overrides });
 }
-test("startup message buttons send one explicit creation request and retire when state is ready", () => {
+test("startup controls attach to the opening and retire without removing its story content", () => {
   const h = mountHarness();
   try {
-    const bubble = h.message("notice"); showStartup(h); showStartup(h);
+    const bubble = h.message("opening"); bubble.append("Ada waits beneath the platform clock."); showStartup(h); showStartup(h);
     assert.equal(h.injections.length, 1);
     const buttons = bubble.querySelectorAll("button"); assert.deepEqual([...buttons].map(button => button.textContent), ["Import Saved Setup", "Create From Character Card"]);
-    assert.ok(bubble.textContent.includes("Restore profiles and the starting scene"));
-    assert.ok(bubble.textContent.includes("character card and selected opening"));
-    for (const button of buttons) assert.ok(document.getElementById(button.getAttribute("aria-describedby")));
+    assert.ok(bubble.textContent.includes("Load saved profiles and starting scene."));
+    assert.ok(bubble.textContent.includes("Build profiles and scene from this card."));
+    for (const button of buttons) {
+      assert.ok(document.getElementById(button.getAttribute("aria-describedby")));
+      assert.ok(button.classList.contains("sce-primary"));
+    }
     buttons[1].click(); buttons[1].click();
     const requests = h.sent.filter(payload => payload.type === "story_create_setup"); assert.equal(requests.length, 1);
     assert.equal(requests[0].chatId, "chat"); assert.equal(buttons[0].disabled, true); assert.equal(buttons[1].disabled, true);
     showStartup(h, { code: "processing", processing: true, canCreate: false, canImport: false });
     assert.equal(bubble.querySelectorAll("button").length, 2);
     h.backend({ type: "story_setup_result", chatId: "chat", requestId: requests[0].requestId, ok: true, message: "Ready." });
-    h.status({ canCreate: false, setupNoticeId: "notice" });
+    h.status({ canCreate: false, setupTargetMessageId: null });
     assert.equal(bubble.querySelectorAll("button").length, 0); assert.equal(h.button("Create From Character Card").hidden, true);
     assert.equal(bubble.querySelector(".sce-inline-setup"), null);
-    assert.ok(!bubble.textContent.includes("Restore profiles and the starting scene"));
+    assert.equal(bubble.textContent, "Ada waits beneath the platform clock.");
     showStartup(h); assert.ok(!document.body.textContent.includes("Ready."));
     assert.ok(document.body.textContent.includes("Import a saved starting state or create one from the character card."));
   } finally { h.restore(); }
@@ -123,7 +126,7 @@ test("startup message buttons send one explicit creation request and retire when
 test("canceling import keeps both startup choices available and starts no creation", async () => {
   const h = mountHarness();
   try {
-    const bubble = h.message("notice"); showStartup(h);
+    const bubble = h.message("opening"); showStartup(h);
     let called = false; h.ctx.uploads.pickFile = async () => { called = true; return []; };
     bubble.querySelector("button").click(); assert.equal(called, true);
     assert.ok([...bubble.querySelectorAll("button")].every(button => button.disabled));
@@ -133,10 +136,24 @@ test("canceling import keeps both startup choices available and starts no creati
   } finally { h.restore(); }
 });
 
+test("startup progress and recoverable errors appear in controls after a frontend restart", () => {
+  const h = mountHarness();
+  try {
+    const bubble = h.message("opening");
+    showStartup(h, { code: "processing", processing: true, canCreate: false, canImport: false });
+    assert.ok(bubble.textContent.includes("Preparing profiles and starting state"));
+    assert.ok([...bubble.querySelectorAll("button")].every(button => button.disabled));
+    showStartup(h, { code: "degraded", text: "PRIVATE_DIAGNOSTIC", processing: false });
+    assert.ok(bubble.textContent.includes("Setup failed. Try again"));
+    assert.ok(!bubble.textContent.includes("PRIVATE_DIAGNOSTIC"));
+    assert.ok([...bubble.querySelectorAll("button")].every(button => !button.disabled));
+  } finally { h.restore(); }
+});
+
 test("inline import shares the drawer picker and ignores files selected after navigation", async () => {
   const h = mountHarness();
   try {
-    const bubble = h.message("notice"); showStartup(h);
+    const bubble = h.message("opening"); showStartup(h);
     h.ctx.uploads.pickFile = async () => [{ bytes: new TextEncoder().encode('{"saved":"setup"}') }];
     bubble.querySelector("button").click(); await Promise.resolve();
     const request = h.sent.find(payload => payload.type === "story_import_setup"); assert.equal(request.fileText, '{"saved":"setup"}');
@@ -155,9 +172,9 @@ test("startup choices attach when their virtualized message becomes visible", ()
   const h = mountHarness();
   try {
     showStartup(h); assert.equal(h.injections.length, 0);
-    const bubble = h.message("notice"); h.events.get("CHARACTER_MESSAGE_RENDERED")({ chatId: "chat", messageId: "notice" });
+    const bubble = h.message("opening"); h.events.get("CHARACTER_MESSAGE_RENDERED")({ chatId: "chat", messageId: "opening" });
     assert.equal(bubble.querySelectorAll("button").length, 2);
-    h.events.get("CHARACTER_MESSAGE_RENDERED")({ chatId: "chat", messageId: "notice" });
+    h.events.get("CHARACTER_MESSAGE_RENDERED")({ chatId: "chat", messageId: "opening" });
     assert.equal(h.injections.length, 1);
     h.events.get("CHAT_SWITCHED")({ chatId: null }); assert.equal(bubble.querySelectorAll("button").length, 0);
   } finally { h.restore(); }
