@@ -1,4 +1,18 @@
 const STORY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H4z"/><path d="M20 4h-4a3 3 0 0 0-3 3v14a4 4 0 0 1 4-3h3z"/><path d="M7 8h3M7 12h3M16 8h1M16 12h1"/></svg>';
+const STORY_WIDGET_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 64 64" fill="none" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="sce-widget-book-gradient" x1="5" y1="12" x2="59" y2="53" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a447fb"/><stop offset=".5" stop-color="#5861ff"/><stop offset="1" stop-color="#14b9ec"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 15C23 9 13 8 5 12v40c9-4 18-2 27 5 9-7 18-9 27-5V12c-9-4-18-3-27 3Z" fill="url(#sce-widget-book-gradient)"/>
+  <path d="M29 20c-6-4-13-6-20-4v30c7-1 14 1 20 5V20Z" fill="#f0eaff"/>
+  <path d="M35 20c6-4 13-6 20-4v30c-7-1-14 1-20 5V20Z" fill="#e0f7ff"/>
+  <path d="M32 17v36" stroke="#c9c2ff" stroke-width="2" stroke-linecap="round"/>
+  <path d="M43 15v19l4-3 4 3V14c-3-.1-6 .3-8 1Z" fill="#fbbf24"/>
+  <path d="m14 25 10 3m-10 5 10 3m-10 5 7 2" stroke="#9071d8" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="m40 39 10-3m-10 10 10-3" stroke="#31a9d3" stroke-width="2.8" stroke-linecap="round"/>
+</svg>`;
 const OUTPUT_OPTIONS = [{ value: "auto", label: "Auto" }, { value: "openai", label: "OpenAI-compatible JSON Schema" }, { value: "anthropic", label: "Anthropic Tool" }, { value: "plain", label: "Plain JSON" }];
 
 export function setup(ctx) {
@@ -23,9 +37,15 @@ export function setup(ctx) {
     .sce-check{display:flex;align-items:center;gap:8px}.sce-toggle{display:flex;align-items:center;justify-content:space-between;gap:12px}.sce-record{border:1px solid var(--lumiverse-border);border-radius:9px;padding:12px;display:grid;gap:7px}
     .sce-record h4{margin:0;font-size:.8rem}.sce-row{display:grid;grid-template-columns:100px 1fr;gap:8px;font-size:.76rem;line-height:1.5;overflow-wrap:anywhere}.sce-row dt{color:var(--lumiverse-text-muted)}.sce-row dd{margin:0;white-space:pre-wrap}
     .sce-json{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:.72rem;line-height:1.5;max-height:550px;overflow:auto}
-    .sce-notice{color:var(--lumiverse-warning,#c89b62)}.sce-widget{display:grid;place-items:center;width:40px;height:40px;padding:0;border:0;background:transparent;color:var(--lumiverse-success,#86af92);cursor:pointer;position:relative}
-    .sce-widget[data-state="processing"]{color:var(--lumiverse-warning,#c89b62);animation:sce-pulse 1.6s ease-in-out infinite}.sce-widget[data-state="attention"],.sce-widget[data-state="setup"]{color:var(--lumiverse-warning,#c89b62)}
-    .sce-widget[data-state="attention"]:after{content:"!";position:absolute;top:0;right:3px;font-weight:700;font-size:12px}@keyframes sce-pulse{50%{opacity:.45}}@media(prefers-reduced-motion:reduce){.sce-widget{animation:none!important}}
+    .sce-notice{color:var(--lumiverse-warning,#c89b62)}
+    .sce-widget{display:grid;place-items:center;width:100%;height:100%;padding:0;border:0;border-radius:10px;background:transparent;cursor:pointer;position:relative;transition:transform .18s ease;--sce-widget-status:#f59e0b}
+    .sce-widget:hover{transform:scale(1.08)}.sce-widget:focus-visible{outline:2px solid var(--lumiverse-primary,#7869c7);outline-offset:2px}
+    .sce-widget svg{display:block;width:32px;height:32px;flex-shrink:0}
+    .sce-widget:after{content:"";position:absolute;right:4px;bottom:4px;box-sizing:border-box;width:11px;height:11px;border:2px solid var(--lumiverse-bg,#191c23);border-radius:50%;background:var(--sce-widget-status);pointer-events:none}
+    .sce-widget[data-state="active"]{--sce-widget-status:#10b981}.sce-widget[data-state="processing"]{--sce-widget-status:#22d3ee}
+    .sce-widget[data-state="processing"]:after{animation:sce-pulse 1.6s ease-in-out infinite}
+    .sce-widget[data-state="attention"]{--sce-widget-status:#f43f5e}.sce-widget[data-state="attention"]:after{content:"!";display:grid;place-items:center;width:14px;height:14px;color:#fff;font:700 9px/1 system-ui}
+    @keyframes sce-pulse{50%{opacity:.45}}@media(prefers-reduced-motion:reduce){.sce-widget{transition:none!important}.sce-widget:after{animation:none!important}}
     .sce-panel [hidden]{display:none!important}
     .sce-inline-setup{display:grid;gap:8px;padding:12px 0}.sce-inline-setup .sce-actions{align-items:center}.sce-inline-setup .sce-button{white-space:normal}
   `);
@@ -204,7 +224,7 @@ export function setup(ctx) {
     if (!widget && typeof ctx.ui.createFloatWidget === "function") {
       try {
         widget = ctx.ui.createFloatWidget({ width: 48, height: 48, initialPosition: { x: 12, y: Math.max(72, Math.round(window.innerHeight * .42)) }, snapToEdge: true, chromeless: true, persistGeometry: "story-continuity-status", tooltip: "Story Continuity" });
-        widgetButton = element("button", "sce-widget"); widgetButton.type = "button"; widgetButton.innerHTML = STORY_ICON;
+        widgetButton = element("button", "sce-widget"); widgetButton.type = "button"; widgetButton.innerHTML = STORY_WIDGET_ICON;
         let start = null, dragged = false;
         widgetButton.addEventListener("pointerdown", event => { start = { x: event.clientX, y: event.clientY }; dragged = false; });
         widgetButton.addEventListener("pointermove", event => { if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) dragged = true; });

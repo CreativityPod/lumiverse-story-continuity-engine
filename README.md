@@ -1,10 +1,10 @@
 # Story Continuity Engine
 
-Persistent character and world state for any character card. Version **1.4.0** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
+Persistent character and world state for any character card. Version **1.4.1** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
 
 ## Install
 
-1. Extract `release/Story_Continuity_Engine_v1.4.0.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
+1. Extract `release/Story_Continuity_Engine_v1.4.1.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
 2. Grant **generation**, **interceptor**, **chat_mutation**, **characters**, and **chats**. These support quiet tracker calls, prompt injection, chat-variable mirrors, and card/chat reads. Grant **world_books** to include enabled constant entries from attached lorebooks and **ui_panels** for the floating widget. This extension does not modify character cards or lorebooks.
 3. Open an ordinary character chat. Choose **Import Saved Setup** or **Create From Character Card** in the startup message, or use the matching controls in the **Story Continuity** drawer. A new chat is recommended for the first run.
 4. Optionally select a tracker connection and structured-output mode, then select **Save Settings**. Without a selection, the host's default connection is used.
@@ -59,6 +59,7 @@ The drawer uses Lumiverse native switches, selects, numeric inputs, checkbox, an
 - **Refresh Card Profiles** rebuilds a native baseline from the edited card and reconciles selected history. For an imported setup, it fills missing stable profile fields from that setup's saved sources while preserving its recorded scene and existing facts. Card edits are flagged before this action; opening edits/swipes rebuild native baselines automatically.
 - **Clean Unused Tracking Files** scans only this extension's files, requires a second click to delete, and verifies candidates again. Malformed or unprovable files are retained.
 - When **Show Widget** is enabled, the draggable, edge-snapping floating icon appears in an eligible chat as soon as its settings are available, including before a snapshot exists. It opens the drawer and reflects waiting for setup, generation, readiness or attention. It follows chat navigation, disappears on Home, respects reduced-motion preferences, and defers specialized cards to Date Simulator. Missing UI panels permission does not prevent tracking.
+- The widget matches Image Browser's **48 × 48** footprint and **32 × 32** artwork. A purple/indigo/cyan book with a gold bookmark stays colorful in every state; its small indicator is amber for setup, cyan while processing, green when ready and rose with an exclamation mark for attention. Keyboard focus remains visible and reduced-motion settings disable the indicator pulse and hover transition.
 
 “Private” means omitted from ordinary replies and the default snapshot. The model receives private state, the user can inspect it, and Lumiverse's prompt inspection can show the injected block. It is not encryption. The tracker is instructed to classify private facts correctly, but extraction accuracy still depends on the selected model.
 

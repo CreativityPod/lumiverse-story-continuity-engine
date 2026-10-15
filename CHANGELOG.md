@@ -1,3 +1,9 @@
+# 1.4.1
+
+- Chat widget matches Image Browser's 48 × 48 footprint and 32 × 32 icon size, with a colorful gradient book and gold bookmark.
+- The artwork retains its colors while a compact badge indicates setup, processing, readiness or attention. Processing animation stays on the badge and respects reduced motion.
+- Full-size click target, hover treatment and keyboard focus accompany the existing drawer shortcut, drag behavior and visibility preference.
+
 # 1.4.0
 
 - New startup message offers Import Saved Setup and Create From Character Card. The engine waits for the user's choice before extraction; canceling import preserves the choices.

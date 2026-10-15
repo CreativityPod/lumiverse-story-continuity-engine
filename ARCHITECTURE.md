@@ -26,6 +26,8 @@ Notice I/O is best effort and never gates an authorized Create/import operation.
 
 The floating widget is gated by active chat, widget preference and specialized-card routing rather than snapshot presence. Its first status can therefore render the icon before extraction. Subsequent chat navigation uses the known preference while loading that chat's status. Waiting, processing, ready and attention states update the same widget; Home, preference-off, chat changes and unload clean up the previous instance. Late status responses from another chat cannot change its state.
 
+The chat widget uses the same 48 × 48 chromeless host dimensions and 32 × 32 SVG dimensions as Image Browser. Its full-size button contains a separate filled, gradient book SVG; the drawer retains its existing line icon. An extension-scoped SVG gradient ID avoids collisions with other extensions. A small status badge supplies state color without recoloring the artwork; only the processing badge pulses. Hover and keyboard focus follow the reference widget's interaction treatment, with reduced-motion overrides. This adds no runtime dependency on Image Browser or external image assets.
+
 ## Model identity protocol
 
 The backend derives a typed alias registry from source-card order and the complete canonical collections before selection. Card characters use `c1`, NPCs `n1`, user characters `u1`, places `p1`, relationships `r1`, objectives `o1`, and lore sources `l1` (subsequent identities increment each prefix). Selecting or focusing a different actor does not renumber the registry. The registry is local to the request and rebuilt for future requests; no model-supplied alias map is trusted or persisted.
