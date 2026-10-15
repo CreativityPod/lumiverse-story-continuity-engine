@@ -11,8 +11,8 @@ function mountHarness(native = false) {
   globalThis.window = dom.window; globalThis.document = dom.window.document;
   const events = new Map(), sent = [], destroyed = [], mounts = [], widgets = [], injections = [], bubbles = new Map();
   let activated = 0;
-  let backend, activate;
-  const tab = { root: document.querySelector("main"), destroy() {}, setBadge() {}, activate() { activated++; }, onActivate: handler => { activate = handler; return () => {}; } };
+  let backend;
+  const tab = { root: document.querySelector("main"), destroy() {}, setBadge() {}, activate() { activated++; }, onActivate: () => () => {} };
   const components = {};
   if (native) for (const method of ["mountSelect", "mountSwitch", "mountCheckbox", "mountNumericInput", "mountBadge"]) {
     components[method] = (slot, options) => {
@@ -41,7 +41,7 @@ function mountHarness(native = false) {
     sendToBackend: payload => sent.push(payload), onBackendMessage: handler => { backend = handler; return () => {}; },
     events: { on: (name, handler) => { events.set(name, handler); return () => {}; } }, getActiveChat: () => ({ chatId: "chat" }), ready() {}, uploads: { pickFile: async () => [] } };
   const destroy = setup(ctx);
-  const status = overrides => backend({ type: "story_status", chatId: "chat", config: { enabled: true, showStatusWidget: false, connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000 },
+  const status = overrides => backend({ type: "story_status", chatId: "chat",
     code: "active", level: "green", text: "Story continuity is current.", revision: 2, lastRevisionAt: "2026-10-13T16:00:00Z", snapshot: publicTrackerSnapshot(fixtureState()), canImport: true, canExport: true, canBegin: false, ...overrides,
     config: { enabled: true, showStatusWidget: false, connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000, ...overrides?.config } });
   const button = label => [...document.querySelectorAll("button")].find(button => button.textContent === label);
@@ -82,11 +82,10 @@ test("chat navigation clears private display and rejects delayed setup responses
     h.status({ text: "Late chat status" }); assert.ok(!document.body.textContent.includes("Late chat status"));
   } finally { h.restore(); }
 });
-test("import picker runs directly from a click and cancel creates no import request", async () => {
+test("cleanup sends the confirmation token returned by the scan", () => {
   const h = mountHarness();
   try {
-    h.status(); const count = h.sent.length; h.button("Import Setup — Choose File").click(); await Promise.resolve();
-    assert.equal(h.sent.length, count);
+    h.status(); h.button("Clean Unused Tracking Files").click(); assert.equal(h.sent.at(-1).type, "story_scan_cleanup");
     h.backend({ type: "story_cleanup_scan", count: 3, token: "confirm", message: "Found 3 unused files" }); h.button("Delete 3 Unused Files").click();
     assert.equal(h.sent.at(-1).token, "confirm"); assert.equal(h.sent.at(-1).type, "story_cleanup_unused");
   } finally { h.restore(); }
@@ -110,6 +109,7 @@ test("startup controls attach to the opening and retire without removing its sto
     }
     buttons[1].click(); buttons[1].click();
     const requests = h.sent.filter(payload => payload.type === "story_create_setup"); assert.equal(requests.length, 1);
+    assert.equal(requests[0].fillMissingSceneDetails, false);
     assert.equal(requests[0].chatId, "chat"); assert.equal(buttons[0].disabled, true); assert.equal(buttons[1].disabled, true);
     showStartup(h, { code: "processing", processing: true, canCreate: false, canImport: false });
     assert.equal(bubble.querySelectorAll("button").length, 2);
@@ -123,20 +123,46 @@ test("startup controls attach to the opening and retire without removing its sto
   } finally { h.restore(); }
 });
 
-test("canceling import keeps both startup choices available and starts no creation", async () => {
+test("scene detail choices sync across setup controls, survive status updates and reset on navigation", () => {
   const h = mountHarness();
   try {
     const bubble = h.message("opening"); showStartup(h);
-    let called = false; h.ctx.uploads.pickFile = async () => { called = true; return []; };
-    bubble.querySelector("button").click(); assert.equal(called, true);
-    assert.ok([...bubble.querySelectorAll("button")].every(button => button.disabled));
-    await Promise.resolve();
-    assert.ok([...bubble.querySelectorAll("button")].every(button => !button.disabled));
-    assert.equal(h.sent.filter(payload => ["story_import_setup", "story_create_setup"].includes(payload.type)).length, 0);
+    const inline = bubble.querySelector('[aria-label="Fill missing scene details"]');
+    const drawer = document.querySelector('.sce-panel [aria-label="Fill missing scene details"]');
+    assert.equal(inline.checked, false); assert.equal(drawer.checked, false);
+    assert.ok(bubble.textContent.includes("Missing date, time, and weather are filled automatically."));
+    inline.checked = true; inline.dispatchEvent(new window.Event("change"));
+    showStartup(h); assert.equal(inline.checked, true); assert.equal(drawer.checked, true);
+    drawer.checked = false; drawer.dispatchEvent(new window.Event("change")); assert.equal(inline.checked, false);
+    drawer.checked = true; drawer.dispatchEvent(new window.Event("change"));
+    h.button("Create From Character Card").click();
+    assert.equal(h.sent.at(-1).fillMissingSceneDetails, true); assert.equal(inline.disabled, true); assert.equal(drawer.disabled, true);
+    h.status({ canCreate: false, setupTargetMessageId: null }); assert.equal(drawer.closest('.sce-scene-options').hidden, true);
+    h.events.get("CHAT_SWITCHED")({ chatId: "other" });
+    showStartup(h, { chatId: "other" }); assert.equal(drawer.checked, false);
+    h.events.get("CHAT_SWITCHED")({ chatId: "chat" });
+    showStartup(h, { fillMissingSceneDetails: true }); assert.equal(drawer.checked, true);
   } finally { h.restore(); }
 });
 
-test("startup progress and recoverable errors appear in controls after a frontend restart", () => {
+test("inline and drawer import open the picker synchronously and cancel without a setup request", async () => {
+  for (const entry of ["inline", "drawer"]) {
+    const h = mountHarness();
+    try {
+      const bubble = h.message("opening");
+      if (entry === "inline") showStartup(h); else h.status();
+      const controls = entry === "inline" ? [...bubble.querySelectorAll("button")] : [h.button("Import Setup — Choose File")];
+      let called = false; h.ctx.uploads.pickFile = async () => { called = true; return []; };
+      controls[0].click(); assert.equal(called, true);
+      assert.ok(controls.every(button => button.disabled));
+      await Promise.resolve();
+      assert.ok(controls.every(button => !button.disabled));
+      assert.equal(h.sent.filter(payload => ["story_import_setup", "story_create_setup"].includes(payload.type)).length, 0);
+    } finally { h.restore(); }
+  }
+});
+
+test("backend setup status restores progress and retry controls", () => {
   const h = mountHarness();
   try {
     const bubble = h.message("opening");
@@ -200,7 +226,7 @@ test("widget follows the active chat immediately and respects Home, disabled pre
   const h = mountHarness();
   try {
     showStartup(h, { config: { showStatusWidget: true } }); h.events.get("CHAT_SWITCHED")({ chatId: "other" });
-    const widget = h.widgets.at(-1); assert.equal(widget.root.isConnected, true); assert.ok(widget.root.textContent !== undefined);
+    const widget = h.widgets.at(-1); assert.equal(widget.root.isConnected, true);
     assert.equal(widget.root.querySelector("button").title, "Loading chat continuity…");
     h.status({ text: "WRONG CHAT", config: { showStatusWidget: true } }); assert.ok(!widget.root.querySelector("button").title.includes("WRONG"));
     h.events.get("CHAT_SWITCHED")({ chatId: null }); assert.equal(widget.root.isConnected, false);

@@ -47,7 +47,7 @@ test("unchanged out-of-scope updates are harmless but all changed out-of-scope r
   });
   assert.equal(JSON.stringify(prior), before);
 });
-test("validation rejects malformed fields, lists, duplicate ids and spoofed provenance", () => {
+test("validation rejects invalid values, duplicate ids and spoofed provenance", () => {
   const malformed = outputState(); malformed.characters[0].visible.physicalState = 42;
   assert.throws(() => materializeTrackerOutput(malformed, null, "a1"), /must be text/);
   const duplicate = outputState(); duplicate.characters.push(duplicate.characters[0]);

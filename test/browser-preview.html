@@ -15,9 +15,9 @@ aside{background:var(--lumiverse-bg);overflow:auto;padding:20px;box-sizing:borde
 import { setup } from '../src/frontend.js';
 import { fixtureState } from './fixtures.js';
 import { publicTrackerSnapshot } from '../src/schemas.js';
-let receive, ready=false, processing=false, epoch=0;
+let receive, ready=false, processing=false, epoch=0, fillMissingSceneDetails=false;
 const state=fixtureState(), config={enabled:true,showStatusWidget:true,connectionId:'',outputMode:'auto',maxTokens:6144,timeoutMs:120000};
-const sendStatus=includePrivate=>receive({type:'story_status',chatId:'preview',config:{...config},code:processing?'processing':ready?'active':'setup',level:ready?'green':'amber',text:processing?'Generating initial profiles and story state…':ready?'Story continuity is current.':'Choose Import Saved Setup or Create From Character Card.',processing,revision:ready?2:0,snapshot:ready?publicTrackerSnapshot(state):null,canImport:!processing,canCreate:!ready&&!processing,canExport:ready,canBegin:false,awaitingSetup:!ready&&!processing,setupTargetMessageId:ready?null:'preview-opening',privateStateIncluded:includePrivate,...(includePrivate?{privateState:ready?state:null}:{})});
+const sendStatus=includePrivate=>receive({type:'story_status',chatId:'preview',config:{...config},code:processing?'processing':ready?'active':'setup',level:ready?'green':'amber',text:processing?'Generating initial profiles and story state…':ready?'Story continuity is current.':'Choose Import Saved Setup or Create From Character Card.',processing,revision:ready?2:0,snapshot:ready?publicTrackerSnapshot(state):null,canImport:!processing,canCreate:!ready&&!processing,canExport:ready,canBegin:false,awaitingSetup:!ready&&!processing,setupTargetMessageId:ready?null:'preview-opening',fillMissingSceneDetails,privateStateIncluded:includePrivate,...(includePrivate?{privateState:ready?state:null}:{})});
 const ctx={
  components:{},ui:{registerDrawerTab(){return{root:document.querySelector('#drawer'),destroy(){},setBadge(){},activate(){document.querySelector('#drawer').scrollIntoView({behavior:'smooth'})},onActivate(){return()=>{}}}},createFloatWidget(options){const root=document.createElement('div');root.className='preview-widget';root.style.width=options.width+'px';root.style.height=options.height+'px';document.body.append(root);return{root,destroy(){root.remove()},onDragEnd(){return()=>{}}}}},
  dom:{addStyle(css){const el=document.createElement('style');el.textContent=css;document.head.append(el);return()=>el.remove()},cleanup(){},findMessageElement(id){return document.getElementById(id)},inject(target,html){const wrapper=document.createElement('div');wrapper.innerHTML=html;target.append(wrapper);return wrapper},uninject(wrapper){wrapper.remove()}},
@@ -25,7 +25,7 @@ const ctx={
  sendToBackend(payload){document.querySelector('#event').textContent=payload.type;queueMicrotask(()=>{
   if(payload.type==='story_get_status')sendStatus(payload.includePrivate);
   if(payload.type==='story_create_setup'){
-    const run=++epoch;processing=true;sendStatus();
+    const run=++epoch;fillMissingSceneDetails=payload.fillMissingSceneDetails===true;processing=true;sendStatus();
     setTimeout(()=>{if(run!==epoch)return;ready=true;processing=false;sendStatus();receive({type:'story_setup_result',chatId:'preview',requestId:payload.requestId,ok:true,message:'Initial profiles and story state are ready.'})},800);
   }
   if(payload.type==='story_set_widget_visibility'){config.showStatusWidget=payload.showStatusWidget;sendStatus()}

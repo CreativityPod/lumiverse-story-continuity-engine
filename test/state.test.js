@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cardSources, isSpecializedCard, prefixFingerprint, listEligibleTurns, transcriptContext, createStore, validCheckpointPrefix, injectContinuity, validateSetupFile, exportInitialSetup, IMPORT_LOADED_TEXT, SETUP_FORMAT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices } from "../src/state.js";
-import { remapStateSources } from "../src/schemas.js";
+import { cardSources, isSpecializedCard, prefixFingerprint, listEligibleTurns, transcriptContext, createStore, validCheckpointPrefix, injectContinuity, validateSetupFile, exportInitialSetup, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices } from "../src/state.js";
 import { CARD, SOURCES, fixtureState } from "./fixtures.js";
 
 test("initialization uses selected greeting and excludes alternate greeting and instruction fields", () => {
@@ -16,7 +15,7 @@ test("specialized cards defer and a generic renamed card still works", () => {
   assert.equal(isSpecializedCard([{ ...CARD, description: "Date Simulator v1.5.7" }]), true);
   assert.equal(isSpecializedCard([{ ...CARD, name: "Custom name", first_mes: "<!--DATE_SIM_STARTUP_MENU_V1-->" }]), true);
 });
-test("edit, swipe and import metadata changes invalidate branch fingerprints", () => {
+test("edits and swipes invalidate branch fingerprints", () => {
   const messages = [{ id: "a0", role: "assistant", content: "Coat on", swipe_id: 0 }];
   const before = prefixFingerprint(messages, 0);
   messages[0].swipe_id = 1; assert.notEqual(prefixFingerprint(messages, 0), before);
@@ -30,7 +29,7 @@ test("only a contiguous validated checkpoint prefix can be reused", () => {
   store.checkpoints[turns[0].key].fingerprint = "stale";
   assert.equal(validCheckpointPrefix(store, turns).count, 0);
 });
-test("observation commands and imported confirmation do not advance tracker turns", () => {
+test("look-command responses do not advance tracker turns", () => {
   const messages = [{ id: "a0", role: "assistant", content: "Opening" }, { id: "u1", role: "user", content: "/look" }, { id: "a1", role: "assistant", content: "Still here" }];
   assert.equal(listEligibleTurns(messages).length, 1);
 });
@@ -52,7 +51,7 @@ test("injection is idempotent, private and leaves the card prompt intact", () =>
   assert.ok(second.messages[1].content.includes("private canonical continuity")); assert.ok(second.messages[1].content.includes("Lantern Guild"));
 });
 
-test("initialization notices never become greetings, tracked turns, or fingerprinted story events", () => {
+test("legacy setup notices stay outside story data and branch fingerprints", () => {
   const notice = { id: "notice", role: "assistant", content: INITIALIZATION_NOTICE_TEXT.generating,
     metadata: { story_continuity_notice: { version: 1, status: "generating" } } };
   const messages = [{ id: "a0", role: "assistant", content: "Opening" }, { id: "u1", role: "user", content: "Hello" }, notice, { id: "a1", role: "assistant", content: "Reply" }];

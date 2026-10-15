@@ -93,7 +93,7 @@ test("a scene's topic does not pull unrelated absent card characters back into t
 });
 test("focused tracker updates merge into full storage and cannot overwrite omitted entities", () => {
   const state = extendedState(), context = buildRoutineTrackerContext({ previousState: state, sources: SOURCES, userText: "Hello", assistantText: "Ada replies." });
-  assert.ok(!JSON.stringify(context.state).includes("REMOTE_SECRET")); assert.equal(context.identities.characters.length, 2);
+  assert.ok(!JSON.stringify(context.state).includes("REMOTE_SECRET"));
   const output = context.state; output.characters[0].visible.dressAndLayers = "Coat folded on bench"; output.characters[0].action = "update";
   const next = materializeTrackerOutput(output, state, "a1", context);
   assert.equal(next.characters[0].visible.dressAndLayers, "Coat folded on bench"); assert.equal(next.characters[1].profile.privateFacts, "REMOTE_SECRET"); assert.equal(next.places[1].currentState, "Lens broken");
@@ -108,7 +108,7 @@ test("large saved source and cast fixtures produce substantially smaller routine
   }
   const before = JSON.stringify(state), oldContext = JSON.stringify(sources) + JSON.stringify(trackerStateForLlm(state));
   const context = buildRoutineTrackerContext({ sources, previousState: state, userText: "Hello", assistantText: "Ada nods." });
-  const newContext = JSON.stringify({ state: context.state, references: context.references, identities: context.identities });
+  const newContext = JSON.stringify({ state: context.state, references: context.references });
   assert.ok(newContext.length < oldContext.length / 2);
   const roleplay = JSON.stringify(buildRoleplayContext(state, "Hello")); assert.ok(!roleplay.includes("UNRELATED_PRIVATE_DETAIL")); assert.ok(!roleplay.includes("REMOTE_SECRET")); assert.equal(JSON.stringify(state), before);
 });

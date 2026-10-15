@@ -76,6 +76,7 @@ export function createStoryEngine(api) {
       canImport: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.importable && !store?.blocked),
       canCreate: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.sources && !store.baseline && !store.blocked && !store.epoch.startsWith("import:")),
       awaitingSetup: Boolean(store?.awaitingSetup), setupTargetMessageId: store?.setupTargetMessageId ?? null,
+      fillMissingSceneDetails: store?.fillMissingSceneDetails === true,
       privateStateIncluded: includePrivate };
     if (includePrivate && store && !store.blocked) payload.privateState = store.current;
     return payload;
@@ -144,8 +145,8 @@ export function createStoryEngine(api) {
       const currentFingerprint = fingerprint(sources);
       const openingChanged = !context.anchor && store.sources && store.sources.selectedOpening !== sources.selectedOpening;
       if (store.epoch !== epoch || openingChanged || options.refreshCards && !context.anchor) {
-        const { revision, lastRevisionAt, initializationMode, setupNoticeId, setupNoticeShown } = store;
-        store = { ...createStore(chatId), revision, lastRevisionAt, epoch, initializationMode, setupNoticeId, setupNoticeShown };
+        const { revision, lastRevisionAt, initializationMode, fillMissingSceneDetails, setupNoticeId, setupNoticeShown } = store;
+        store = { ...createStore(chatId), revision, lastRevisionAt, epoch, initializationMode, fillMissingSceneDetails, setupNoticeId, setupNoticeShown };
       }
       // A deleted import anchor must discard all imported state, including its baseline.
       if (context.anchor && (!store.baseline || store.sourceFingerprint !== context.anchor.fingerprint)) {
@@ -196,7 +197,8 @@ export function createStoryEngine(api) {
       await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
-        const baseline = await runTracker(api, { initialize: true, sources: store.sources, sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
+        const baseline = await runTracker(api, { initialize: true, sources: store.sources, fillMissingSceneDetails: store.fillMissingSceneDetails,
+          sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
         const freshMessages = await api.chat.getMessages(chatId);
         const fresh = await getSources(chatId, freshMessages, userId);
@@ -300,6 +302,7 @@ export function createStoryEngine(api) {
     const originalTurns = listEligibleTurns(sourcePrefix, sourceContext), turns = listEligibleTurns(messages, context);
     const prefix = validCheckpointPrefix(source, originalTurns);
     const next = createStore(forkedChatId);
+    next.fillMissingSceneDetails = source.fillMissingSceneDetails;
     next.sources = source.sources;
     next.epoch = source.epoch.startsWith("import:") ? `import:${map.get(source.epoch.slice(7))}` : source.epoch;
     if (next.epoch === "import:undefined") return false;
@@ -393,6 +396,7 @@ export function createStoryEngine(api) {
           if (transcriptContext(messages).anchor) throw new Error("A saved setup is already loaded.");
           if (selection(userId) !== chatId || generating.has(chatId)) throw new Error("Open the intended chat and wait for the current response to finish.");
           store.initializationMode = "create"; store.awaitingSetup = false; store.lastError = "";
+          if (!store.baseline) store.fillMissingSceneDetails = payload.fillMissingSceneDetails === true;
           await saveStore(store);
         });
         await schedule(chatId, {}, userId);

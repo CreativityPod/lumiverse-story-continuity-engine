@@ -1,3 +1,11 @@
+# 1.5.0
+
+- New card setups fill missing fictional date, time and weather during the existing extraction request, respecting established card/opening/lore constraints.
+- Optional **Fill missing scene details** starts off and permits missing model-character outfit, minor grooming, mild mood and brief atmosphere. Inline and drawer choices stay synchronized and disappear after setup.
+- Saved defaults survive reopen, turn reprocessing, forks and portable export/import. Existing/imported setups are not backfilled; routine tracking and imported-profile refresh cannot generate new scene defaults.
+- Setup choice survives worker restarts; missing initial clock/weather uses the existing single repair limit with no new generation stage or canonical schema change.
+- Reviewed tests remove redundant provider combinations, obsolete notice mocks and implementation-name checks while retaining behavior coverage and testing the new setup policy/lifecycle.
+
 # 1.4.4
 
 - Setup controls attach directly beneath the narrative opening; no hidden placeholder, progress, error or completion notice is posted. Legacy notices are removed even while awaiting setup.

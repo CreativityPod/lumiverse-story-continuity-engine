@@ -104,13 +104,14 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
     initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    initializationMode: "", awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
+    initializationMode: "", fillMissingSceneDetails: false, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
 export function normalizeStore(value, chatId) {
   const empty = createStore(chatId);
   if (!value || value.schemaVersion !== 1 || value.chatId !== chatId) return empty;
   const next = { ...empty, ...value, processing: false };
+  next.fillMissingSceneDetails = value.fillMissingSceneDetails === true;
   next.rejectedTurn = typeof value.rejectedTurn?.signature === "string" && typeof value.rejectedTurn?.error === "string"
     ? { signature: value.rejectedTurn.signature, error: value.rejectedTurn.error.slice(0, 450) } : null;
   next.initializationMode = value.initializationMode === "create" || value.baseline || value.revision > 0 ? "create" : "";
