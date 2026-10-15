@@ -47,7 +47,8 @@ export function setup(ctx) {
     .sce-widget[data-state="attention"]{--sce-widget-status:#f43f5e}.sce-widget[data-state="attention"]:after{content:"!";display:grid;place-items:center;width:14px;height:14px;color:#fff;font:700 9px/1 system-ui}
     @keyframes sce-pulse{50%{opacity:.45}}@media(prefers-reduced-motion:reduce){.sce-widget{transition:none!important}.sce-widget:after{animation:none!important}}
     .sce-panel [hidden]{display:none!important}
-    .sce-inline-setup{display:grid;gap:8px;padding:12px 0}.sce-inline-setup .sce-actions{align-items:center}.sce-inline-setup .sce-button{white-space:normal}
+    .sce-inline-setup{display:grid;gap:12px;padding:12px 0}.sce-inline-setup .sce-actions{align-items:start;gap:16px}.sce-inline-setup .sce-button{white-space:normal}
+    .sce-setup-choice{display:grid;gap:6px;flex:1 1 200px}.sce-setup-choice .sce-button{justify-self:start}
   `);
   cleanups.push(removeStyle);
   const tab = ctx.ui.registerDrawerTab({ id: "story-continuity", title: "Story Continuity Engine", shortName: "Story Continuity", headerTitle: "Story Continuity",
@@ -196,8 +197,15 @@ export function setup(ctx) {
     const wrapper = ctx.dom.inject(bubble, '<div class="sce-inline-setup" role="group" aria-label="Story setup choices"></div>', "beforeend");
     const root = wrapper.querySelector(".sce-inline-setup"), actions = element("div", "sce-actions"), hint = element("div", "sce-hint");
     hint.setAttribute("aria-live", "polite"); root.append(actions, hint);
+    const choice = (label, description, action, primary = false) => {
+      const container = element("div", "sce-setup-choice"), help = element("div", "sce-hint", description);
+      help.id = `sce-setup-help-${routeGeneration}-${actions.children.length}`;
+      const control = button(container, label, action, primary); control.setAttribute("aria-describedby", help.id);
+      container.append(help); actions.append(container); return control;
+    };
     inlineSetup = { wrapper, messageId: status.setupNoticeId, chatId: activeChatId,
-      import: button(actions, "Import Saved Setup", chooseImport), create: button(actions, "Create From Character Card", createFromCard, true), feedback: hint };
+      import: choice("Import Saved Setup", "Restore profiles and the starting scene from an exported setup JSON file. Use a fresh chat before sending a message.", chooseImport),
+      create: choice("Create From Character Card", "Build new profiles and a starting state from this chat's character card and selected opening.", createFromCard, true), feedback: hint };
     updateButtons();
   }
   function renderSnapshot(snapshot) {

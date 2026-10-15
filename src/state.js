@@ -7,11 +7,12 @@ export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", leg
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
 export const INITIALIZATION_NOTICE_TEXT = Object.freeze({
-  choice: "**Story Continuity Engine**\n\nHow would you like to initialize this story? Choose Import Saved Setup or Create From Character Card below, or open the Story Continuity drawer.",
+  choice: "**Story Continuity Engine**\n\nChoose how to prepare the profiles and starting state for this chat. These setup choices disappear once your setup is ready.",
   generating: "**Story Continuity Engine**\n\nGenerating the initial character profiles and starting story state… Please wait.",
-  ready: "**Story Continuity Engine**\n\nInitial profiles and story state are ready.",
+  ready: "**Story Continuity Engine**\n\nInitial profiles and story state are ready.", // Legacy prompt filtering only; never posted on completion.
   failed: "**Story Continuity Engine**\n\nInitialization failed. Open Story Continuity for details and retry.",
 });
+const LEGACY_SETUP_CHOICE_TEXT = "**Story Continuity Engine**\n\nHow would you like to initialize this story? Choose Import Saved Setup or Create From Character Card below, or open the Story Continuity drawer.";
 
 export function contentToText(content) {
   if (typeof content === "string") return content;
@@ -26,14 +27,14 @@ export function isInitializationNotice(message) {
 
 // Host history projections can carry source IDs instead of extension metadata.
 // Exact text is a fallback for older hosts; user-authored text is never matched.
-export function stripInitializationNotices(messages, storedMessages = []) {
-  const ids = new Set(storedMessages.filter(isInitializationNotice).map(message => String(message.id)));
+export function stripInitializationNotices(messages, storedMessages = [], knownNoticeIds = []) {
+  const ids = new Set([...knownNoticeIds, ...storedMessages.filter(isInitializationNotice).map(message => String(message.id))]);
   return messages.filter(message => {
     if (isInitializationNotice(message)) return false;
     const id = message.sourceMessageId ?? message.id;
     if (id != null) return !ids.has(String(id));
     if (message.__isChatHistory && Number.isInteger(message.sourceIndexInChat) && isInitializationNotice(storedMessages[message.sourceIndexInChat])) return false;
-    return message.role === "user" || !Object.values(INITIALIZATION_NOTICE_TEXT).includes(contentToText(message.content).trim());
+    return message.role === "user" || ![...Object.values(INITIALIZATION_NOTICE_TEXT), LEGACY_SETUP_CHOICE_TEXT].includes(contentToText(message.content).trim());
   });
 }
 

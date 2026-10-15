@@ -1,3 +1,9 @@
+# 1.4.3
+
+- Startup buttons include short instructions explaining saved setup import and creation from the card/selected opening.
+- Successful profile creation or import removes the entire temporary setup message, instructions and controls without posting a hidden completion notice.
+- Older ready/interrupted notices are cleaned up without tracker calls or checkpoint changes. Import recovery anchors remain intact; deletion failures retry later and deleted notice IDs stay out of already assembled prompts.
+
 # 1.4.2
 
 - Routine tracker catalogs distinguish editable records from reference-only identities; provider schemas restrict entity records to selected IDs and new creation aliases while keeping character cross-references available.

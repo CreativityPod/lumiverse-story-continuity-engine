@@ -102,6 +102,9 @@ test("startup message buttons send one explicit creation request and retire when
     const bubble = h.message("notice"); showStartup(h); showStartup(h);
     assert.equal(h.injections.length, 1);
     const buttons = bubble.querySelectorAll("button"); assert.deepEqual([...buttons].map(button => button.textContent), ["Import Saved Setup", "Create From Character Card"]);
+    assert.ok(bubble.textContent.includes("Restore profiles and the starting scene"));
+    assert.ok(bubble.textContent.includes("character card and selected opening"));
+    for (const button of buttons) assert.ok(document.getElementById(button.getAttribute("aria-describedby")));
     buttons[1].click(); buttons[1].click();
     const requests = h.sent.filter(payload => payload.type === "story_create_setup"); assert.equal(requests.length, 1);
     assert.equal(requests[0].chatId, "chat"); assert.equal(buttons[0].disabled, true); assert.equal(buttons[1].disabled, true);
@@ -110,6 +113,8 @@ test("startup message buttons send one explicit creation request and retire when
     h.backend({ type: "story_setup_result", chatId: "chat", requestId: requests[0].requestId, ok: true, message: "Ready." });
     h.status({ canCreate: false, setupNoticeId: "notice" });
     assert.equal(bubble.querySelectorAll("button").length, 0); assert.equal(h.button("Create From Character Card").hidden, true);
+    assert.equal(bubble.querySelector(".sce-inline-setup"), null);
+    assert.ok(!bubble.textContent.includes("Restore profiles and the starting scene"));
     showStartup(h); assert.ok(!document.body.textContent.includes("Ready."));
     assert.ok(document.body.textContent.includes("Import a saved starting state or create one from the character card."));
   } finally { h.restore(); }

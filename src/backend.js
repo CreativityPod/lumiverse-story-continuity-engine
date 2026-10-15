@@ -129,6 +129,26 @@ export function createStoryEngine(api) {
     return notice;
   }
 
+  async function removeInitializationNotices(store) {
+    if (deleted.has(store.chatId)) return;
+    try {
+      const messages = await api.chat.getMessages(store.chatId);
+      const notices = messages.filter(message => isInitializationNotice(message) && !message.metadata?.story_continuity_setup);
+      // Remember IDs before deleting: host delete events and an already assembled
+      // prompt may still refer to these temporary setup rows.
+      rememberNotices(store.chatId, notices);
+      for (const notice of notices) {
+        if (deleted.has(store.chatId)) return;
+        await api.chat.deleteMessage(store.chatId, notice.id);
+      }
+      store.setupNoticeId = null;
+      await saveStore(store);
+    } catch {
+      // The committed profile is authoritative; retry UI cleanup on a later check.
+      api.log.warn("Story continuity setup panel could not be removed.");
+    }
+  }
+
   async function reconcile(chatId, options = {}, userId = users.get(chatId)) {
     if (!chatId || deleted.has(chatId)) return;
     const config = await loadConfig();
@@ -257,7 +277,8 @@ export function createStoryEngine(api) {
       await saveStore(store);
       api.log.warn(`Story continuity update failed: ${store.lastError}`);
     } finally {
-      if (finishNotice) await writeInitializationNotice(chatId, initializationNotice, store.lastError || !store.current ? "failed" : "ready");
+      if (initializationNotice && store.baseline && !store.blocked) await removeInitializationNotices(store);
+      else if (finishNotice) await writeInitializationNotice(chatId, initializationNotice, "failed");
       processing.delete(chatId); await publish(chatId, userId, options.includePrivate);
     }
   }
@@ -271,19 +292,20 @@ export function createStoryEngine(api) {
 
   async function intercept(messages, context) {
     const config = await loadConfig(), chatId = context?.chatId;
-    let clean = stripInitializationNotices(messages);
+    const stripNotices = (input, stored = []) => stripInitializationNotices(input, stored, noticeIds.get(chatId));
+    let clean = stripNotices(messages);
     if (!config.enabled || !chatId || deleted.has(chatId) || required.some(permission => !has(permission))) {
-      if (chatId && !deleted.has(chatId) && has("chat_mutation")) clean = stripInitializationNotices(clean, await api.chat.getMessages(chatId));
+      if (chatId && !deleted.has(chatId) && has("chat_mutation")) clean = stripNotices(clean, await api.chat.getMessages(chatId));
       return clean;
     }
     if (isSpecializedCard([], clean)) {
-      clean = stripInitializationNotices(clean, await api.chat.getMessages(chatId));
+      clean = stripNotices(clean, await api.chat.getMessages(chatId));
       if (isSpecializedCard([], clean)) return clean;
     }
     await schedule(chatId, {}, context.userId ?? users.get(chatId));
     const store = await loadStore(chatId);
     const selectedMessages = await api.chat.getMessages(chatId);
-    clean = stripInitializationNotices(clean, selectedMessages);
+    clean = stripNotices(clean, selectedMessages);
     if (!store.current || store.blocked) return clean;
     // Revalidate the currently selected prefix even when a tracker update failed.
     const fresh = await getSources(chatId, selectedMessages, context.userId ?? users.get(chatId));

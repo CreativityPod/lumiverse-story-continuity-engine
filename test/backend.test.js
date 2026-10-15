@@ -6,7 +6,7 @@ import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState, modelOutput } from "./fixtures.js";
 
 function harness() {
-  const files = new Map(), variables = new Map(), events = new Map(), sent = [], requests = [], noticeWrites = [];
+  const files = new Map(), variables = new Map(), events = new Map(), sent = [], requests = [], noticeWrites = [], noticeDeletes = [];
   const messages = new Map([["chat", [{ id: "a0", role: "assistant", content: CARD.first_mes, swipe_id: 0 }]]]);
   const cards = new Map([["ada", structuredClone(CARD)]]), chats = new Map([["chat", { id: "chat", character_id: "ada", metadata: {} }]]);
   let response = null, messageSequence = 0;
@@ -33,6 +33,12 @@ function harness() {
         if (isInitializationNotice(entry)) noticeWrites.push(structuredClone(entry));
         await emitNoticeEvent("MESSAGE_EDITED", chatId, entry);
       },
+      deleteMessage: async (chatId, messageId) => {
+        const entry = messages.get(chatId)?.find(message => message.id === messageId); if (!entry) throw new Error("Message not found");
+        messages.set(chatId, messages.get(chatId).filter(message => message.id !== messageId));
+        if (isInitializationNotice(entry)) noticeDeletes.push(structuredClone(entry));
+        await emitNoticeEvent("MESSAGE_DELETED", chatId, entry);
+      },
       setMessageHidden: async (chatId, messageId, hidden) => {
         const entry = messages.get(chatId)?.find(message => message.id === messageId); if (!entry) throw new Error("Message not found");
         entry.extra = { ...entry.extra, hidden }; await emitNoticeEvent("MESSAGE_EDITED", chatId, entry);
@@ -50,7 +56,12 @@ function harness() {
   const create = async (chatId = "chat") => engine.handleFrontend({ type: "story_create_setup", chatId, requestId: "create" }, "owner");
   const select = async (chatId = "chat") => { await open(chatId); if ((await engine.loadStore(chatId)).awaitingSetup) await create(chatId); };
   const addTurn = (text, id = "a1") => messages.get("chat").push({ id: `u-${id}`, role: "user", content: "Continue" }, { id, role: "assistant", content: text, swipe_id: 0 });
-  return { api, engine, files, variables, messages, cards, chats, events, sent, requests, noticeWrites, permissions, select, open, create, addTurn, setResponse: handler => { response = handler; } };
+  return { api, engine, files, variables, messages, cards, chats, events, sent, requests, noticeWrites, noticeDeletes, permissions, select, open, create, addTurn, setResponse: handler => { response = handler; } };
+}
+
+function addLegacyNotice(h, phase = "ready", id = "legacy-notice") {
+  const notice = { id, role: "system", content: INITIALIZATION_NOTICE_TEXT[phase], metadata: { story_continuity_notice: { version: 1, status: phase } } };
+  h.messages.get("chat").push(notice); return notice;
 }
 
 test("chosen card setup initializes, preserves original setup and rechecks without generation", async () => {
@@ -262,7 +273,7 @@ test("GUID-backed saves inject only aliases and rejected alias typos cannot comm
   assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes(guid));
 });
 
-test("one visible notice precedes initialization and updates to ready without extra turns or calls", async () => {
+test("the temporary setup panel is deleted after initialization without a completion message", async () => {
   const h = harness(); let release, started;
   const gate = new Promise(resolve => { release = resolve; }), observed = new Promise(resolve => { started = resolve; });
   h.setResponse(async () => { started(); await gate; return { content: JSON.stringify(modelOutput(undefined, { initialize: true })) }; });
@@ -271,9 +282,9 @@ test("one visible notice precedes initialization and updates to ready without ex
   assert.equal(notice.role, "system"); assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.generating); assert.equal(notice.extra.hidden, true);
   assert.equal((await h.engine.loadStore("chat")).current, null);
   release(); await pending;
-  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "generating", "ready"]);
-  assert.equal(h.noticeWrites[0].id, h.noticeWrites[2].id); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1);
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready); assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "generating"]);
+  assert.equal(h.noticeWrites[0].id, h.noticeDeletes[0].id); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+  assert.equal((await h.engine.status("chat", "owner")).setupNoticeId, null); assert.equal(h.requests.length, 1);
   assert.deepEqual(Object.keys((await h.engine.loadStore("chat")).checkpoints), ["a0::0"]);
   assert.ok(!JSON.stringify(h.requests[0].messages).includes("Generating the initial character profiles"));
   const count = h.noticeWrites.length;
@@ -288,14 +299,23 @@ test("failed initialization updates the same notice without disclosing tracker d
   assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.failed); assert.ok(!notice.content.includes("PRIVATE_DIAGNOSTIC"));
   assert.equal((await h.engine.loadStore("chat")).current, null);
   h.setResponse(null); await h.engine.schedule("chat", {}, "owner");
-  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1); assert.equal(notice.id, id);
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready);
-  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "generating", "failed", "generating", "ready"]);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(h.noticeDeletes[0].id, id);
+  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "generating", "failed", "generating"]);
+});
+
+test("a committed profile retires setup controls even when later history tracking fails", async () => {
+  const h = harness(); await h.open(); h.addTurn("Ada nods.");
+  h.setResponse(async request => ({ content: request.messages[1].content.startsWith("INITIALIZE")
+    ? JSON.stringify(modelOutput(undefined, { initialize: true })) : "invalid" }));
+  await h.create(); const store = await h.engine.loadStore("chat");
+  assert.ok(store.baseline); assert.ok(store.current); assert.ok(store.lastError);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+  assert.equal(store.setupNoticeId, null);
 });
 
 test("notice edits and deletion do not invalidate checkpoints or reset the opening", async () => {
   const h = harness(); await h.select(); h.addTurn("Ada nods."); await h.engine.schedule("chat", {}, "owner");
-  const notice = h.messages.get("chat").find(isInitializationNotice), before = await h.engine.loadStore("chat"), calls = h.requests.length;
+  const notice = addLegacyNotice(h), before = await h.engine.loadStore("chat"), calls = h.requests.length;
   notice.content = "Storyteller v1.6.0 — edited administrative status"; notice.swipe_id = 2;
   await h.events.get("MESSAGE_EDITED")({ chatId: "chat", message: notice }, "owner");
   await h.engine.schedule("chat", {}, "owner");
@@ -309,7 +329,7 @@ test("notice edits and deletion do not invalidate checkpoints or reset the openi
 });
 
 test("deleting the notice during a tracker call keeps valid story output and does not recreate it", async () => {
-  const h = harness(); await h.select(); h.addTurn("Coat removed.");
+  const h = harness(); await h.select(); addLegacyNotice(h, "generating"); h.addTurn("Coat removed.");
   h.setResponse(async () => {
     const notice = h.messages.get("chat").find(isInitializationNotice);
     h.messages.set("chat", h.messages.get("chat").filter(message => message.id !== notice.id));
@@ -323,7 +343,7 @@ test("deleting the notice during a tracker call keeps valid story output and doe
 
 test("notice history is stripped from prompts even when initialization failed or tracking is disabled", async () => {
   const h = harness(); await h.select();
-  const notice = h.messages.get("chat").find(isInitializationNotice);
+  const notice = h.noticeDeletes[0];
   const prompt = [{ role: "system", content: "Character voice" },
     { role: "assistant", content: "Older notice text", sourceMessageId: notice.id, __isChatHistory: true },
     { role: "user", content: "Continue" }];
@@ -338,13 +358,17 @@ test("notice history is stripped from prompts even when initialization failed or
   assert.deepEqual(result, [prompt[2]]); assert.equal((await failed.engine.loadStore("chat")).current, null);
 });
 
-test("a restarted worker finishes an interrupted notice without regenerating an already committed baseline", async () => {
+test("a restarted worker removes legacy ready/interrupted notices without changing saved state", async () => {
   const h = harness(); await h.select();
-  const notice = h.messages.get("chat").find(isInitializationNotice), count = h.requests.length;
-  notice.metadata.story_continuity_notice.status = "generating"; notice.content = INITIALIZATION_NOTICE_TEXT.generating;
+  addLegacyNotice(h); addLegacyNotice(h, "generating", "interrupted-notice");
+  h.messages.get("chat").push({ id: "user-copy", role: "user", content: INITIALIZATION_NOTICE_TEXT.ready });
+  const count = h.requests.length, before = await h.engine.loadStore("chat");
   const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready); assert.equal(h.requests.length, count);
-  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1);
+  assert.equal(h.requests.length, count); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+  assert.ok(h.messages.get("chat").some(message => message.id === "user-copy"));
+  const after = await restarted.loadStore("chat");
+  assert.deepEqual(after.current, before.current); assert.deepEqual(after.initialSetup, before.initialSetup);
+  assert.deepEqual(after.checkpoints, before.checkpoints); assert.equal(after.revision, before.revision);
 });
 
 test("specialized, disabled and imported chats do not post generation notices", async () => {
@@ -360,15 +384,20 @@ test("specialized, disabled and imported chats do not post generation notices", 
   assert.equal(imported.messages.get("chat").filter(isInitializationNotice).length, 0);
 });
 
-test("notice write failures do not discard canonical state and a later recheck completes the notice", async () => {
+test("setup panel I/O failures preserve saved state and removal retries without generation", async () => {
   const absent = harness(); absent.api.chat.appendMessage = async () => { throw new Error("Notice service unavailable"); };
   await absent.select(); assert.ok((await absent.engine.loadStore("chat")).current); assert.equal(absent.requests.length, 1);
-  const h = harness(), update = h.api.chat.updateMessage;
+  const h = harness();
   h.api.chat.updateMessage = async () => { throw new Error("Notice edit unavailable"); };
   await h.select(); assert.ok((await h.engine.loadStore("chat")).current);
-  const notice = h.messages.get("chat").find(isInitializationNotice); assert.equal(notice.metadata.story_continuity_notice.status, "choice");
-  h.api.chat.updateMessage = update; await h.engine.schedule("chat", {}, "owner");
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready); assert.equal(h.requests.length, 1);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+  const retry = harness(), remove = retry.api.chat.deleteMessage;
+  retry.api.chat.deleteMessage = async () => { throw new Error("Notice deletion unavailable"); };
+  await retry.select(); const before = await retry.engine.loadStore("chat");
+  assert.ok(before.current); assert.equal(retry.messages.get("chat").filter(isInitializationNotice).length, 1);
+  retry.api.chat.deleteMessage = remove; await retry.engine.schedule("chat", {}, "owner");
+  assert.equal(retry.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(retry.requests.length, 1);
+  assert.equal((await retry.engine.loadStore("chat")).revision, before.revision);
 });
 
 test("fresh chats wait for an explicit setup choice across events, prompt interception and restarts", async () => {
@@ -386,7 +415,7 @@ test("fresh chats wait for an explicit setup choice across events, prompt interc
   assert.equal(h.requests.length, 0); assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 1);
   await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "choose" }, "owner");
   store = await restarted.loadStore("chat"); assert.ok(store.current); assert.equal(store.awaitingSetup, false); assert.equal(h.requests.length, 1);
-  assert.equal(notice.content, INITIALIZATION_NOTICE_TEXT.ready);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0); assert.equal(store.setupNoticeId, null);
   await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "repeat" }, "owner");
   assert.equal(h.requests.length, 1);
 });
@@ -400,7 +429,10 @@ test("importing from the startup choice restores locally without an unused extra
   const store = await h.engine.loadStore("chat"), status = await h.engine.status("chat", "owner");
   assert.equal(store.current.world.weather, "Clear skies"); assert.equal(store.awaitingSetup, false);
   assert.equal(status.canCreate, false); assert.equal(status.canBegin, true);
-  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice", "ready"]);
+  assert.deepEqual(h.noticeWrites.map(message => message.metadata.story_continuity_notice.status), ["choice"]);
+  assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
+  const anchor = h.messages.get("chat").find(message => message.metadata?.story_continuity_setup);
+  assert.ok(anchor); assert.ok(!h.noticeDeletes.some(message => message.id === anchor.id));
   await h.engine.handleFrontend({ type: "story_begin", chatId: "chat" }, "owner");
   assert.ok(h.messages.get("chat").some(message => message.id === "begin-response"));
   assert.equal(h.requests.length, 0);

@@ -79,3 +79,10 @@ test("prompt filtering recognizes notice metadata and host source identity while
   assert.equal(isInitializationNotice({ role: "user", content: "Hello", metadata }), false);
   assert.equal(isInitializationNotice({ is_user: true, extra: { spindle_metadata: metadata } }), false);
 });
+
+test("deleted setup IDs and older choice text are excluded from already assembled prompts", () => {
+  const oldText = "**Story Continuity Engine**\n\nHow would you like to initialize this story? Choose Import Saved Setup or Create From Character Card below, or open the Story Continuity drawer.";
+  const keep = { role: "user", content: oldText };
+  const prompt = [{ role: "system", content: "An edited setup notice", sourceMessageId: "deleted-setup" }, { role: "system", content: oldText }, keep];
+  assert.deepEqual(stripInitializationNotices(prompt, [], new Set(["deleted-setup"])), [keep]);
+});
