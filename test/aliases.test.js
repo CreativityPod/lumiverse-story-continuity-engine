@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createAliasRegistry, encodeModelState, encodeModelSources, encodeModelReferences, modelAliasCatalog, aliasOutputSchema, decodeModelOutput } from "../src/aliases.js";
 import { trackerStateForLlm, materializeTrackerOutput, validateState } from "../src/schemas.js";
-import { buildRoleplayContext } from "../src/context.js";
+import { buildRoleplayContext, buildRoutineTrackerContext } from "../src/context.js";
 import { SOURCES, fixtureState, character, modelOutput } from "./fixtures.js";
 
 const GUID = "12345678-1234-4321-8765-123456789abc";
@@ -134,6 +134,31 @@ test("dynamic structured-output schemas enumerate only supplied typed aliases", 
   assert.equal(schema.properties.characters.maxItems, 24);
   const full = fixtureState(); for (let index = 0; index < 23; index++) full.characters.push(character(`npc:full-${index}`, "npc"));
   assert.deepEqual(modelAliasCatalog(createAliasRegistry(SOURCES, full)).creation.characters, []);
+});
+
+test("routine schemas restrict output records while keeping reference-only identities available", () => {
+  const state = castState();
+  state.places.push({ ...state.places[0], id: "place:remote", name: "Observatory", description: "Distant hilltop" });
+  const scope = buildRoutineTrackerContext({ previousState: state, sources: SOURCES, assistantText: "Ada nods." });
+  const registry = createAliasRegistry(SOURCES, state), schema = aliasOutputSchema(registry, scope), catalog = modelAliasCatalog(registry, scope);
+  for (const [kind, alias] of [["characters", "n1"], ["places", "p2"], ["relationships", "r1"], ["objectives", "o1"]]) {
+    assert.equal(catalog.existing[kind].find(entry => entry.id === alias).canUpdate, false);
+    assert.ok(!schema.properties[kind].items.properties.id.enum.includes(alias));
+  }
+  assert.equal(catalog.existing.characters.find(entry => entry.id === "c1").canUpdate, true);
+  assert.ok(schema.properties.places.items.properties.id.enum.includes("p1"));
+  assert.ok(schema.properties.places.items.properties.id.enum.includes("new_p1"));
+  assert.ok(schema.properties.relationships.items.properties.toId.enum.includes("n1"));
+  assert.ok(schema.properties.objectives.items.properties.ownerId.enum.includes("n1"));
+});
+
+test("a full unselected collection requires an empty array without an empty provider enum", () => {
+  const state = fixtureState(); state.world.location = "Uncharted clearing"; state.characters[0].visible.position = "Unknown";
+  state.places = Array.from({ length: 32 }, (_, index) => ({ ...state.places[0], id: `place:remote-${index}`, name: `Remote${index}`, description: "Distant hilltop" }));
+  const scope = buildRoutineTrackerContext({ previousState: state, sources: SOURCES, assistantText: "Ada nods." });
+  const schema = aliasOutputSchema(createAliasRegistry(SOURCES, state), scope);
+  assert.equal(schema.properties.places.maxItems, 0);
+  assert.ok(schema.properties.places.items.properties.id.enum.length > 0);
 });
 
 test("preserved entities keep their established names when decoding other entities' prose", () => {

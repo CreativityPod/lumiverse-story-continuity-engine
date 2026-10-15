@@ -7,12 +7,25 @@ const contextNormalize = text => String(text ?? "").normalize("NFKC").toLowerCas
 const contextWords = text => new Set(contextNormalize(text).split(" ").filter(word => word.length > 2 && word !== "unknown"));
 const hasKnownValue = value => typeof value === "string" && value !== "Unknown" && Boolean(value.trim());
 const phraseMentioned = (text, phrase) => { const normalized = contextNormalize(phrase); return normalized && (` ${contextNormalize(text)} `).includes(` ${normalized} `); };
+const LOCATION_STOP_WORDS = new Set("a an the at in on by near inside outside within beneath under above beside of to".split(" "));
+
+function placesAtLocation(places, location) {
+  if (!hasKnownValue(location)) return [];
+  const named = places.filter(place => phraseMentioned(location, place.name) || phraseMentioned(location, place.id));
+  if (named.length) return named;
+  // Resolve a sublocation only when its words identify one saved place. Connections
+  // and private/current facts are not evidence that the scene is at a destination.
+  const words = contextNormalize(location).split(" ").filter(word => word && word !== "unknown" && !LOCATION_STOP_WORDS.has(word));
+  if (!words.length) return [];
+  const matches = places.filter(place => words.every(word => phraseMentioned(`${place.name} ${place.description}`, word)));
+  return matches.length === 1 ? matches : [];
+}
 
 // Selection operates on committed state only; it never invents presence or changes storage.
 export function selectRelevantState(state, text = "", { focusCharacterId } = {}) {
   const focusId = state.characters.some(char => char.id === focusCharacterId) ? focusCharacterId : `char:${focusCharacterId}`;
   const focus = state.characters.find(char => char.id === focusId) ?? state.characters.find(char => char.role === "main") ?? state.characters[0];
-  const currentPlaces = state.places.filter(place => phraseMentioned(state.world.location, place.name) || phraseMentioned(state.world.location, place.id));
+  const currentPlaces = placesAtLocation(state.places, state.world.location);
   const locationWords = contextWords([state.world.location, ...currentPlaces.map(place => `${place.name} ${place.description}`)].join(" "));
   const ranked = state.characters.map((char, index) => {
     const mentioned = phraseMentioned(text, char.name) || phraseMentioned(text, char.id);
@@ -23,7 +36,8 @@ export function selectRelevantState(state, text = "", { focusCharacterId } = {})
   }).filter(entry => entry.score > 0).sort((a, b) => b.score - a.score || a.index - b.index);
   const characters = ranked.map(entry => entry.char), ids = new Set(characters.map(char => char.id));
   const relationships = state.relationships.filter(rel => ids.has(rel.fromId) && ids.has(rel.toId));
-  const places = state.places.filter(place => currentPlaces.includes(place) || phraseMentioned(text, place.name) || phraseMentioned(text, place.id));
+  const positionedPlaces = new Set(characters.flatMap(char => placesAtLocation(state.places, char.visible.position)));
+  const places = state.places.filter(place => currentPlaces.includes(place) || positionedPlaces.has(place) || phraseMentioned(text, place.name) || phraseMentioned(text, place.id));
   const objectives = state.objectives.filter(objective => ids.has(objective.ownerId) && (objective.status === "active" || phraseMentioned(text, objective.id)));
   return { schemaVersion: state.schemaVersion, world: state.world, characters, relationships, places, objectives };
 }

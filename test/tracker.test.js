@@ -76,3 +76,58 @@ test("a mistyped existing alias is repaired without changing its persistent iden
   assert.equal(requests.length, 2); assert.equal(next.characters.length, 1); assert.equal(next.characters[0].id, previous.characters[0].id);
   assert.equal(next.characters[0].visible.dressAndLayers, "Coat folded on bench"); assert.equal(next.characters[0].sourceMessageId, "a1");
 });
+
+test("unchanged unselected places no longer consume a repair or block selected updates", async () => {
+  const previous = fixtureState();
+  previous.places.push({ ...previous.places[0], id: "place:remote", name: "Observatory", description: "Distant hilltop", currentState: "Lens broken" });
+  let calls = 0;
+  const api = { connections: { list: async () => [] }, generate: { quiet: async () => {
+    calls++; const output = modelOutput(previous); output.characters[0].visible.dressAndLayers = "Coat on bench";
+    return { content: JSON.stringify(output) };
+  } } };
+  const state = await runTracker(api, { sources: SOURCES, previousState: previous, assistantText: "Ada removes her coat.", sourceMessageId: "a1" }, {}, "owner");
+  assert.equal(calls, 1); assert.deepEqual(state.places, previous.places);
+  assert.equal(state.characters[0].visible.dressAndLayers, "Coat on bench");
+});
+
+test("scope repair names every rejected alias across providers and preserves valid selected updates", async () => {
+  for (const provider of ["openai", "anthropic", "gemini", "plain"]) {
+    const previous = fixtureState();
+    const ids = ["place:12345678-1234-4321-8765-123456789abc", "place:87654321-1234-4321-8765-123456789abc"];
+    for (const [index, name] of ["Observatory", "Quarry"].entries()) previous.places.push({ ...previous.places[0], id: ids[index], name, description: "Distant hilltop" });
+    let calls = 0;
+    const api = { connections: { get: async () => ({ provider }) }, generate: { quiet: async request => {
+      calls++;
+      const catalog = JSON.parse(request.messages[1].content.split("\n").at(-1));
+      assert.deepEqual(catalog.existing.places.map(entry => entry.canUpdate), [true, false, false]);
+      const schema = request.parameters.response_format?.json_schema.schema ?? request.parameters.responseSchema ?? request.tools?.[0].parameters;
+      if (schema) {
+        assert.ok(schema.properties.places.items.properties.id.enum.includes("p1"));
+        assert.ok(!schema.properties.places.items.properties.id.enum.includes("p2"));
+      }
+      const output = modelOutput(previous); output.characters[0].visible.dressAndLayers = "Coat on bench";
+      if (calls === 1) for (const place of output.places.slice(1)) place.currentState = "Unsupported change";
+      else {
+        const repair = request.messages.at(-1).content;
+        for (const term of ["p2", "p3", "Observatory", "Quarry", "Remove ALL", "canUpdate true"]) assert.ok(repair.includes(term));
+        for (const id of ids) assert.ok(!JSON.stringify(request.messages).includes(id));
+        output.places = output.places.slice(0, 1);
+      }
+      return { content: JSON.stringify(output) };
+    } } };
+    const state = await runTracker(api, { sources: SOURCES, previousState: previous, assistantText: "Ada removes her coat.", sourceMessageId: "a1" }, { connectionId: provider }, "owner");
+    assert.equal(calls, 2); assert.deepEqual(state.places, previous.places);
+    assert.equal(state.characters[0].visible.dressAndLayers, "Coat on bench");
+  }
+});
+
+test("a place referred to by its saved sublocation can receive a supported update", async () => {
+  const previous = fixtureState(); previous.world.location = "Platform";
+  const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+    assert.ok(request.messages[1].content.includes('"description":"A covered platform"'));
+    const output = modelOutput(previous); output.places[0].currentState = "Side door open";
+    return { content: JSON.stringify(output) };
+  } } };
+  const state = await runTracker(api, { sources: SOURCES, previousState: previous, assistantText: "Ada opens the side door.", sourceMessageId: "a1" }, {}, "owner");
+  assert.equal(state.places[0].currentState, "Side door open"); assert.equal(state.places[0].sourceMessageId, "a1");
+});

@@ -99,19 +99,25 @@ export function encodeModelReferences(references, registry) {
     ownerId: registry.forward.characters.has(reference.ownerId) ? registry.aliasFor("characters", reference.ownerId) : registry.aliasFor("lore", reference.ownerId) }));
 }
 
-export function modelAliasCatalog(registry) {
+export function modelAliasCatalog(registry, { allowedUpdateIds } = {}) {
   const existing = Object.fromEntries(Object.keys(ALIAS_LIMITS).map(kind => [kind, []]));
-  for (const [id, record] of registry.reverse) if (existing[record.kind]) existing[record.kind].push({ id, ...(record.name ? { name: record.name } : {}), ...(record.role ? { role: record.role, controller: record.controller } : {}) });
+  for (const [id, record] of registry.reverse) if (existing[record.kind]) existing[record.kind].push({ id,
+    canUpdate: !allowedUpdateIds || Boolean(allowedUpdateIds[record.kind]?.has(record.id)),
+    ...(record.name ? { name: record.name } : {}), ...(record.role ? { role: record.role, controller: record.controller } : {}) });
   return rewriteAliasValues({ existing, creation: Object.fromEntries(Object.keys(ALIAS_LIMITS).map(kind => [kind, [...registry.creation].filter(([, record]) => record.kind === kind).map(([alias]) => alias)])) }, registry.rewriteText);
 }
 
-export function aliasOutputSchema(registry) {
+export function aliasOutputSchema(registry, { allowedUpdateIds } = {}) {
   const schema = structuredClone(TRACKER_OUTPUT_JSON_SCHEMA);
-  const idsFor = kind => [...registry.reverse].filter(([, record]) => record.kind === kind).map(([alias]) => alias)
+  const idsFor = (kind, selectedOnly = false) => [...registry.reverse].filter(([, record]) => record.kind === kind
+    && (!selectedOnly || !allowedUpdateIds || allowedUpdateIds[kind]?.has(record.id))).map(([alias]) => alias)
     .concat([...registry.creation].filter(([, record]) => record.kind === kind).map(([alias]) => alias));
   for (const kind of Object.keys(ALIAS_LIMITS)) {
     const properties = schema.properties[kind].items.properties;
-    properties.id = { type: "string", enum: idsFor(kind) };
+    const outputIds = idsFor(kind, true);
+    // A full, entirely unselected collection must be empty; never emit an invalid empty enum.
+    properties.id = { type: "string", enum: outputIds.length ? outputIds : idsFor(kind) };
+    if (!outputIds.length) schema.properties[kind].maxItems = 0;
     if (kind === "relationships") for (const key of ["fromId", "toId"]) properties[key] = { type: "string", enum: idsFor("characters") };
     if (kind === "objectives") properties.ownerId = { type: "string", enum: idsFor("characters") };
   }

@@ -20,6 +20,27 @@ test("routine relevance omits absent NPCs and places, then restores their saved 
   assert.equal(retrieved.characters[0].id, "char:ada"); assert.equal(retrieved.characters[1].profile.privateFacts, "REMOTE_SECRET"); assert.equal(retrieved.places[1].currentState, "Lens broken"); assert.equal(retrieved.relationships.length, 1);
   assert.equal(JSON.stringify(state), before);
 });
+
+test("sublocation wording and selected character positions retrieve established place records", () => {
+  const state = extendedState(); state.world.location = "Inside the platform"; state.characters[0].visible.position = "Unknown";
+  const before = JSON.stringify(state);
+  const context = buildRoutineTrackerContext({ previousState: state, sources: SOURCES, assistantText: "Ada opens the side door." });
+  assert.deepEqual(context.state.places.map(place => place.name), ["Station"]);
+  assert.ok(context.allowedUpdateIds.places.has("place:station"));
+  assert.equal(JSON.stringify(state), before);
+  state.world.location = "Unknown"; state.characters[0].visible.position = "At the Station";
+  assert.deepEqual(selectRelevantState(state, "Ada nods.").places.map(place => place.name), ["Station"]);
+});
+
+test("ambiguous sublocations, numbered platforms and connections do not guess the current place", () => {
+  const state = fixtureState(); state.world.location = "Platform"; state.characters[0].visible.position = "Unknown";
+  state.places.push({ ...state.places[0], id: "place:second", name: "Depot", description: "Covered platform 2" });
+  assert.deepEqual(selectRelevantState(state).places, []);
+  state.world.location = "Inside platform 2";
+  assert.deepEqual(selectRelevantState(state).places.map(place => place.name), ["Depot"]);
+  state.world.location = "Town road";
+  assert.deepEqual(selectRelevantState(state).places, []);
+});
 test("same-location NPCs, user state and an explicitly focused group member receive context", () => {
   const state = extendedState(); state.characters[1].visible.position = "Station platform";
   const user = character("user", "user"); for (const field of Object.keys(user.internal)) user.internal[field] = "Unknown"; state.characters.push(user);

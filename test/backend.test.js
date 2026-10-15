@@ -87,6 +87,55 @@ test("failed tracker retains only the last valid branch prefix and injection rem
   const result = await h.engine.intercept([{ role: "user", content: "Next" }], { chatId: "chat", userId: "owner" });
   assert.ok(result.messages[0].content.includes("using last valid checkpoint"));
 });
+
+test("rejected turns pause automatic calls across events and restart until explicitly reprocessed", async () => {
+  const h = harness(); await h.select(); const initial = await h.engine.loadStore("chat");
+  h.addTurn("Ada nods."); h.setResponse(async () => ({ content: "invalid" }));
+  await h.engine.schedule("chat", {}, "owner");
+  const failed = await h.engine.loadStore("chat");
+  assert.equal(h.requests.length, 3); assert.ok(failed.rejectedTurn);
+  assert.match(failed.lastError, /Automatic retries are paused/);
+  assert.deepEqual(failed.current, initial.current); assert.equal(failed.revision, initial.revision);
+  await h.events.get("MESSAGE_SENT")({ chatId: "chat" }, "owner");
+  await h.events.get("CHAT_SWITCHED")({ chatId: "chat" }, "owner");
+  h.addTurn("Ada waits.", "a2");
+  const prompt = await h.engine.intercept([{ role: "user", content: "Next" }], { chatId: "chat", userId: "owner" });
+  assert.ok(prompt.messages[0].content.includes("using last valid checkpoint"));
+  const restarted = createStoryEngine(h.api);
+  await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 3); assert.equal((await restarted.loadStore("chat")).revision, initial.revision);
+  h.setResponse(null);
+  await restarted.schedule("chat", { reprocess: true }, "owner");
+  const recovered = await restarted.loadStore("chat");
+  assert.equal(h.requests.length, 5); assert.equal(recovered.lastError, ""); assert.equal(recovered.rejectedTurn, null);
+  assert.ok(recovered.checkpoints["a1::0"] && recovered.checkpoints["a2::0"]);
+});
+
+test("edits and tracker setting changes release rejection pauses while widget changes do not", async () => {
+  for (const change of ["edit", "config"]) {
+    const h = harness(); await h.select(); h.addTurn("Ada nods.");
+    h.setResponse(async () => ({ content: "invalid" })); await h.engine.schedule("chat", {}, "owner");
+    assert.equal(h.requests.length, 3);
+    await h.engine.handleFrontend({ type: "story_set_widget_visibility", chatId: "chat", showStatusWidget: false }, "owner");
+    assert.equal(h.requests.length, 3);
+    h.setResponse(null);
+    if (change === "edit") {
+      h.messages.get("chat").find(message => message.id === "a1").content = "Ada opens the door.";
+      await h.engine.schedule("chat", {}, "owner");
+    } else await h.engine.handleFrontend({ type: "story_save_config", chatId: "chat", config: { maxTokens: 8192 } }, "owner");
+    const store = await h.engine.loadStore("chat");
+    assert.equal(h.requests.length, 4); assert.equal(store.lastError, ""); assert.equal(store.rejectedTurn, null);
+  }
+});
+
+test("transient provider failures remain eligible for automatic retry", async () => {
+  const h = harness(); await h.select(); h.addTurn("Ada nods.");
+  h.setResponse(async () => { throw new Error("Provider unavailable"); });
+  await h.engine.schedule("chat", {}, "owner"); await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 3); assert.equal((await h.engine.loadStore("chat")).rejectedTurn, null);
+  h.setResponse(null); await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 4); assert.equal((await h.engine.loadStore("chat")).lastError, "");
+});
 test("stale tracker output is discarded when the selected turn changes during generation", async () => {
   const h = harness(); await h.select(); h.addTurn("Coat removed.");
   h.setResponse(async () => { h.messages.get("chat").at(-1).content = "New swipe during tracking"; return { content: JSON.stringify(modelOutput()) }; });

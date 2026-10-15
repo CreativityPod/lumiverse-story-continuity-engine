@@ -101,7 +101,7 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
-    initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", blocked: "",
+    initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
     initializationMode: "", awaitingSetup: false, setupNoticeId: null, setupNoticeShown: false };
 }
 
@@ -109,6 +109,8 @@ export function normalizeStore(value, chatId) {
   const empty = createStore(chatId);
   if (!value || value.schemaVersion !== 1 || value.chatId !== chatId) return empty;
   const next = { ...empty, ...value, processing: false };
+  next.rejectedTurn = typeof value.rejectedTurn?.signature === "string" && typeof value.rejectedTurn?.error === "string"
+    ? { signature: value.rejectedTurn.signature, error: value.rejectedTurn.error.slice(0, 450) } : null;
   next.initializationMode = value.initializationMode === "create" || value.baseline || value.revision > 0 ? "create" : "";
   next.checkpoints = value.checkpoints && typeof value.checkpoints === "object" && !Array.isArray(value.checkpoints) ? value.checkpoints : {};
   try {
@@ -116,6 +118,7 @@ export function normalizeStore(value, chatId) {
   } catch {
     next.baseline = next.current = next.initialSetup = null;
     next.checkpoints = {};
+    next.rejectedTurn = null;
     next.lastError = "Invalid saved state was discarded; continuity will rebuild from the selected transcript.";
   }
   return next;

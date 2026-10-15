@@ -1,3 +1,10 @@
+# 1.4.2
+
+- Routine tracker catalogs distinguish editable records from reference-only identities; provider schemas restrict entity records to selected IDs and new creation aliases while keeping character cross-references available.
+- Place selection retrieves unique saved sublocations and places named in selected characters' positions, preserving ambiguity and numeric qualifiers.
+- Unchanged records labeled `update` retain saved facts/provenance without consuming a repair. Changed out-of-scope records remain rejected, with all offending aliases/names supplied to the single repair.
+- Rejected routine turns pause unchanged automatic retries across events and worker restarts. Explicit Reprocess, relevant edits/settings changes or refreshed sources/state allow retry; transient provider errors remain retryable. Existing checkpoints and setup files remain compatible.
+
 # 1.4.1
 
 - Chat widget matches Image Browser's 48 × 48 footprint and 32 × 32 icon size, with a colorful gradient book and gold bookmark.

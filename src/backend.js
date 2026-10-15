@@ -16,6 +16,7 @@ export function createStoryEngine(api) {
   const saveStore = async store => { if (!deleted.has(store.chatId)) await api.storage.setJson(pathFor(store.chatId), store, { indent: 2 }); };
   const send = (payload, userId) => api.sendToFrontend(payload, userId);
   const required = ["generation", "interceptor", "chat_mutation", "characters", "chats"];
+  const rejectionRetryHint = " Automatic retries are paused for this turn. Use Reprocess Latest Turn to retry.";
   const selection = userId => selected.get(userKey(userId));
   function adopt(chatId, userId) { const id = typeof chatId === "string" && chatId ? chatId : null; selected.set(userKey(userId), id); if (id) users.set(id, userId); return id; }
   function requestChat(payload, userId) {
@@ -135,7 +136,7 @@ export function createStoryEngine(api) {
     let store = await loadStore(chatId);
     processing.add(chatId);
     const deadline = Date.now() + 240000;
-    let initializationNotice = null, finishNotice = false;
+    let initializationNotice = null, finishNotice = false, trackerAttempt = null;
     try {
       const messages = await api.chat.getMessages(chatId);
       rememberNotices(chatId, messages);
@@ -223,19 +224,36 @@ export function createStoryEngine(api) {
       for (let index = prefix.count; index < turns.length; index++) {
         const turn = turns[index];
         const isOpening = !context.anchor && index === 0 && !turn.user && contentToText(turn.assistant.content) === store.sources.selectedOpening;
+        // After generation and repair both fail, do not repeat an unchanged request
+        // on every background event. Keep the proven prefix across worker restarts.
+        const signature = isOpening ? null : fingerprint({ contract: 1, userId, epoch: store.epoch, sources: store.sourceFingerprint,
+          previousState, turn: turn.fingerprint, focusCharacterId: turn.assistant.character_id,
+          connectionId: config.connectionId, outputMode: config.outputMode, maxTokens: config.maxTokens, timeoutMs: config.timeoutMs });
+        if (signature && store.rejectedTurn?.signature === signature && !options.reprocess && !options.refreshCards) {
+          store.lastError = store.rejectedTurn.error + rejectionRetryHint;
+          await saveStore(store);
+          return;
+        }
+        store.rejectedTurn = null; trackerAttempt = signature;
         const state = isOpening ? previousState : await runTracker(api, { sources: store.sources, previousState, focusCharacterId: turn.assistant.character_id,
           userText: contentToText(turn.user?.content), assistantText: contentToText(turn.assistant.content),
           sourceMessageId: String(turn.assistant.id), isOpening, remainingMs: remaining() }, config, userId);
+        trackerAttempt = null;
         if (!(await matches(chatId, messages, turn.index))) throw new Error("The selected branch changed during tracking; stale output was discarded.");
         store.checkpoints[turn.key] = { fingerprint: turn.fingerprint, state, createdAt: new Date().toISOString() };
         store.current = state; previousState = state; commitRevision(store);
         if (!context.anchor && index === 0 && (!store.initialSetup || store.initialSetup.fingerprint !== turn.fingerprint)) store.initialSetup = { key: turn.key, fingerprint: turn.fingerprint, state: structuredClone(state) };
         await saveStore(store); await mirror(store);
       }
+      store.rejectedTurn = null;
       if (store.initialSetup?.key && !turns.some(turn => turn.key === store.initialSetup.key && turn.fingerprint === store.initialSetup.fingerprint)) store.initialSetup = null;
       await saveStore(store);
     } catch (error) {
       store.lastError = String(error?.message ?? error).slice(0, 600);
+      if (trackerAttempt && error?.code === "TRACKER_STATE_REJECTED") {
+        store.rejectedTurn = { signature: trackerAttempt, error: store.lastError.slice(0, 450) };
+        store.lastError = store.rejectedTurn.error + rejectionRetryHint;
+      }
       await saveStore(store);
       api.log.warn(`Story continuity update failed: ${store.lastError}`);
     } finally {

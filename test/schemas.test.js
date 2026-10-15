@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateState, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA, legacyTrackerState } from "../src/schemas.js";
+import { validateState, TrackerScopeError, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA, legacyTrackerState } from "../src/schemas.js";
 import { fixtureState, character, outputState } from "./fixtures.js";
 
 test("state validates and the observable projection omits all private sections", () => {
@@ -24,6 +24,28 @@ test("omitted old characters and places remain persistent", () => {
   const prior = fixtureState(), output = trackerStateForLlm(prior);
   output.characters = []; output.places = [];
   assert.deepEqual(materializeTrackerOutput(output, prior, "a1"), prior);
+});
+
+test("unchanged out-of-scope updates are harmless but all changed out-of-scope records are rejected", () => {
+  const prior = fixtureState();
+  prior.places.push({ ...prior.places[0], id: "place:remote", name: "Observatory", currentState: "Lens broken" });
+  const scope = { allowedUpdateIds: { characters: new Set(["char:ada"]), places: new Set(), relationships: new Set(), objectives: new Set() } };
+  const output = outputState(prior); output.characters[0].visible.dressAndLayers = "Coat on bench";
+  // Equivalent JSON can arrive with a different property order.
+  output.places[0] = Object.fromEntries(Object.entries(output.places[0]).reverse());
+  const next = materializeTrackerOutput(output, prior, "a1", scope);
+  assert.deepEqual(next.places, prior.places);
+  assert.equal(next.characters[0].visible.dressAndLayers, "Coat on bench");
+  assert.equal(next.characters[0].sourceMessageId, "a1");
+  output.places[0].currentState = "Door open"; output.places[1].currentState = "Lens repaired";
+  const before = JSON.stringify(prior);
+  assert.throws(() => materializeTrackerOutput(output, prior, "a2", scope), error => {
+    assert.ok(error instanceof TrackerScopeError);
+    assert.deepEqual(error.violations.map(entry => entry.id), ["place:station", "place:remote"]);
+    assert.match(error.message, /Observatory/);
+    return true;
+  });
+  assert.equal(JSON.stringify(prior), before);
 });
 test("validation rejects malformed fields, lists, duplicate ids and spoofed provenance", () => {
   const malformed = outputState(); malformed.characters[0].visible.physicalState = 42;

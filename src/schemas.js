@@ -119,19 +119,38 @@ export function upgradeTrackerState(value) {
   return upgraded;
 }
 
+export class TrackerScopeError extends Error {
+  constructor(violations) {
+    super(violations.map(({ kind, id, name }) => `Cannot update an omitted ${kind} entity ${id}${name ? ` (${JSON.stringify(name)})` : ""}`).join("; ") + "; preserve it or omit it.");
+    this.violations = violations;
+  }
+}
+
 export function materializeTrackerOutput(value, previousState, sourceMessageId, { allowedUpdateIds } = {}) {
   const output = validateNode(value, TRACKER_OUTPUT_JSON_SCHEMA, "output");
   for (const key of ["characters", "relationships", "places", "objectives"]) {
     if (new Set(output[key].map(entry => entry.id)).size !== output[key].length) throw new Error(`${key} contains duplicate ids`);
   }
   const previous = previousState ? validateState(previousState) : cloneEmptyState();
+  const unchanged = (candidate, prior) => prior && Object.keys(prior).every(key => key === "sourceMessageId" || JSON.stringify(candidate[key]) === JSON.stringify(prior[key]));
+  const violations = [];
+  if (allowedUpdateIds) for (const kind of ["characters", "relationships", "places", "objectives"]) {
+    const saved = new Map(previous[kind].map(entry => [entry.id, entry]));
+    for (const candidate of output[kind]) {
+      const prior = saved.get(candidate.id);
+      if (prior && !allowedUpdateIds[kind].has(candidate.id) && candidate.action !== "preserve" && !unchanged(candidate, prior)) {
+        violations.push({ kind, id: prior.id, ...(prior.name ? { name: prior.name } : {}) });
+      }
+    }
+  }
+  if (violations.length) throw new TrackerScopeError(violations);
   const materialize = (candidate, prior) => {
     if (candidate.action === "preserve") {
       if (!prior) throw new Error("A new entity cannot use preserve");
       return structuredClone(prior);
     }
     const { action, ...data } = candidate;
-    if (prior && JSON.stringify(data) === JSON.stringify(Object.fromEntries(Object.entries(prior).filter(([key]) => key !== "sourceMessageId")))) return structuredClone(prior);
+    if (unchanged(candidate, prior)) return structuredClone(prior);
     return { ...data, sourceMessageId };
   };
   const state = { schemaVersion: 2, world: materialize(output.world, previous.world) };
@@ -139,7 +158,6 @@ export function materializeTrackerOutput(value, previousState, sourceMessageId, 
     const merged = new Map(previous[key].map(entry => [entry.id, structuredClone(entry)]));
     for (const candidate of output[key]) {
       const prior = merged.get(candidate.id);
-      if (prior && allowedUpdateIds && !allowedUpdateIds[key].has(candidate.id) && candidate.action !== "preserve") throw new Error(`Cannot update an omitted ${key} entity; preserve it or omit it`);
       if (key === "characters" && prior && (prior.controller !== candidate.controller || prior.role !== candidate.role)) throw new Error("An established character's role and controller cannot be changed");
       merged.set(candidate.id, materialize(candidate, prior));
     }
