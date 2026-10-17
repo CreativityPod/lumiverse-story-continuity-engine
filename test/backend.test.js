@@ -150,6 +150,44 @@ test("programmatic world defaults survive restart, reprocess and portable setup 
   for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], values[field]);
 });
 
+test("contextual starting conditions persist in mirrors, restart and portable setups without rerolling", async () => {
+  const h = harness();
+  h.cards.get("ada").scenario = "A contemporary café patio in San Diego, California; no date, time or weather is established.";
+  h.cards.get("ada").first_mes = h.messages.get("chat")[0].content = "Ada waits on the café patio, wearing a blue coat.";
+  const original = structuredClone(h.messages.get("chat"));
+  const chosen = fixtureState();
+  Object.assign(chosen.world, { location: "Café patio, San Diego",
+    weather: "Partly cloudy; dry conditions and a light coastal breeze. The patio is sheltered from the wind." });
+  h.setResponse(async () => {
+    const { values } = [...h.files.values()].find(store => store?.initialWorldDefaults).initialWorldDefaults;
+    // An unconstrained opening reuses the saved clock anchors while enriching missing weather.
+    Object.assign(chosen.world, { date: values.date, time: values.time });
+    return { content: JSON.stringify(modelOutput(chosen, { initialize: true })) };
+  });
+  await h.select();
+  const initial = await h.engine.loadStore("chat");
+  assert.equal(h.requests.length, 1); assert.equal(initial.fillMissingSceneDetails, false);
+  for (const field of ["date", "time", "weather"]) assert.equal(initial.current.world[field], chosen.world[field]);
+  const visual = h.variables.get(`chat:${CHAT_KEYS.visual}`);
+  assert.ok(visual.includes(`WHEN: ${formatStoryClockValue("date", chosen.world.date)}; ${formatStoryClockValue("time", chosen.world.time)}`));
+  assert.ok(visual.includes(chosen.world.weather));
+  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.public}`)).world.weather, chosen.world.weather);
+  const restarted = createStoryEngine(h.api);
+  await restarted.schedule("chat", { reprocess: true }, "owner");
+  assert.equal(h.requests.length, 1);
+  await restarted.handleFrontend({ type: "story_export_setup", chatId: "chat", requestId: "context-export" }, "owner");
+  const exported = h.sent.at(-1).payload; assert.equal(exported.ok, true);
+  await restarted.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: exported.fileText, requestId: "context-import" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 1);
+  for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], chosen.world[field]);
+  const prompt = await restarted.intercept([{ role: "user", content: "I nod." }], { chatId: "chat", userId: "owner" });
+  assert.match(prompt.messages[0].content, /brief gestures may leave the displayed minute unchanged/i);
+  assert.match(prompt.messages[0].content, /Do not use a fixed advance per reply/);
+  assert.ok(prompt.messages[0].content.includes(chosen.world.weather));
+  // Import adds its confirmation; the original selected opening is preserved.
+  assert.deepEqual(h.messages.get("chat").slice(0, original.length), original);
+});
+
 test("v1.5.3 failed setup evidence can restore a preview locally without running generation", async () => {
   const h = harness(), response = modelOutput(undefined, { initialize: true }); response.world.sceneStatus = "in_progress";
   h.setResponse(async () => ({ content: JSON.stringify(response), finish_reason: "stop" })); await h.select();

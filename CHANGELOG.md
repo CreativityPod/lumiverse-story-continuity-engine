@@ -1,3 +1,11 @@
+# 1.6.4
+
+- Choose wholly missing initial date, time and weather together in the existing extraction call, fitting established setting and opening constraints. Preserve source facts, partial clocks, fictional calendars and brief weather without adding missing detail.
+- Give missing weather concise contextual descriptions, optional plausible approximate temperature, and indoor/airless-world handling. Avoid unsupported climate/season/daylight assumptions, forecasts and future events. Automatic starting conditions apply independently of the optional scene-details checkbox.
+- Use saved fictional date/time anchors when unconstrained and retain programmatic defaults as a safety backstop for Unknown/omitted output. No new model call, canonical field or setup migration; contextual fitting depends on the extraction model.
+- Clarify ordinary time progression in the tracker and roleplay injection: conservative passage from completed dialogue/action, no fixed per-reply tick, no premature task completion or unsupported skip, and preserved clock uncertainty. Observation and real waiting do not advance time.
+- Add coverage for contextual setup with optional details off, partial/non-weather-world values through repair, ordinary pacing, and persistence/mirrors/export/import of chosen conditions. Tracker contract is now 7; existing/imported baselines are not backfilled.
+
 # 1.6.3
 
 - Present the scene clock consistently in the drawer, turn injection and visual macro: month/day without Gregorian years, 12-hour AM/PM times and short time-of-day descriptions. Preserve source-established seasons and descriptions alongside exact clock values; keep standalone approximate values usable. Shared rendering preserves internal calendar precision and existing JSON formats, with no new model call or migration. Version remains 1.6.3.

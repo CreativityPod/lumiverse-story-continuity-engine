@@ -112,6 +112,74 @@ test("optional scene filling shares the extraction call and retains partial esta
   assert.equal(state.characters[0].visible.dressAndLayers, "Blue coat"); assert.equal(state.characters[0].visible.hairAndGrooming, "Black hair");
 });
 
+test("native setup requests contextual starting conditions with the optional checkbox off", async () => {
+  const sources = structuredClone(SOURCES), requests = [];
+  sources.cards[0].scenario = "A contemporary coastal village near San Diego, California. No calendar, clock or weather details are established.";
+  sources.selectedOpening = sources.cards[0].first_mes = "Ada waits by the shore, wearing a blue coat.";
+  const chosen = fixtureState();
+  Object.assign(chosen.world, { date: "2031-07-14", time: "08:15 (Morning)", weather: "Warm, humid air; scattered clouds and a gentle coastal breeze.", location: "Village shore" });
+  const defaults = { date: "2031-07-14", time: "08:15", weather: "Light rain" };
+  const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+    requests.push(request);
+    const system = request.messages[0].content, setup = request.messages[1].content;
+    assert.match(system, /For wholly missing world fields only, choose coherent starting conditions together/);
+    assert.match(system, /independently of the optional checkbox/);
+    assert.match(system, /For wholly missing weather, write one concise, contextual description/);
+    assert.match(system, /For a sealed, airless or otherwise non-weather setting/);
+    assert.match(system, /never a real forecast/);
+    assert.match(system, /without filling in a missing year, minute, temperature/);
+    assert.match(system, /Fill missing scene details is OFF/);
+    assert.ok(setup.includes(JSON.stringify(defaults)));
+    return { content: JSON.stringify(modelOutput(chosen, { sources, initialize: true })) };
+  } } };
+  const next = await runTracker(api, { initialize: true, sources, initialWorldDefaults: defaults, sourceMessageId: "card-baseline" }, {});
+  assert.equal(requests.length, 1);
+  for (const field of ["date", "time", "weather", "location"]) assert.equal(next.world[field], chosen.world[field]);
+});
+
+test("initial scene conditions preserve partial clocks and non-weather worlds through field repair", async () => {
+  for (const world of [
+    { date: "Winter, 1890", time: "After sunset", weather: "Rain" },
+    { date: "Third day of the Ash Moon", time: "Second watch", weather: "Not applicable; an airless lunar chamber" },
+  ]) {
+    const chosen = fixtureState(), requests = [];
+    Object.assign(chosen.world, world);
+    const rejected = modelOutput(chosen, { initialize: true }); rejected.world.sceneStatus = "Uncertain";
+    const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+      requests.push(request);
+      return { content: JSON.stringify(requests.length === 1 ? rejected : {
+        schemaVersion: 2, world: { action: "update", changes: [{ field: "sceneStatus", value: "active" }] },
+        characters: [], relationships: [], places: [], objectives: [],
+      }) };
+    } } };
+    const next = await runTracker(api, { initialize: true, sources: SOURCES,
+      initialWorldDefaults: { date: "2031-06-12", time: "16:00", weather: "Clear skies" }, sourceMessageId: "card-baseline" }, {});
+    assert.equal(requests.length, 2);
+    for (const field of ["date", "time", "weather"]) assert.equal(next.world[field], world[field]);
+    assert.equal(next.world.sceneStatus, "active");
+  }
+});
+
+test("routine timing contract supports implied passage without fixed ticks or finishing pending activities", async () => {
+  const previous = fixtureState(); previous.world.time = "Around midnight";
+  let calls = 0;
+  const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+    calls++;
+    const prompt = request.messages[0].content;
+    assert.match(prompt, /conservatively implied by completed public dialogue and action/);
+    assert.match(prompt, /never add a fixed minute per turn/);
+    assert.match(prompt, /Do not finish an in-progress activity/);
+    assert.match(prompt, /Keep approximate clocks approximate/);
+    assert.match(prompt, /Weather changes only when the narrative supports it/);
+    assert.ok(!prompt.includes("For wholly missing world fields only"));
+    return { content: JSON.stringify({ schemaVersion: 2, world: { action: "preserve", changes: [] },
+      characters: [], relationships: [], places: [], objectives: [] }) };
+  } } };
+  const next = await runTracker(api, { sources: SOURCES, previousState: previous,
+    userText: "I nod.", assistantText: "Ada begins inspecting the signal box; the task is still in progress.", sourceMessageId: "a1" }, {});
+  assert.equal(calls, 1); assert.equal(next.world.time, "Around midnight"); assert.equal(next.world.weather, previous.world.weather);
+});
+
 test("routine requests use extracted profiles and exclude raw cards while initialization retains sources", async () => {
   const sources = structuredClone(SOURCES); sources.cards[0].description += " RAW_CARD_ONLY_SENTINEL."; sources.cards[0].exampleDialogue = "EXAMPLE_ONLY_SENTINEL"; sources.selectedOpening = "OPENING_ONLY_SENTINEL";
   const previous = fixtureState(); previous.characters[0].profile.relationshipContext = "Longstanding station partnership"; previous.characters[0].profile.boundaries = "Do not open the private locker";
