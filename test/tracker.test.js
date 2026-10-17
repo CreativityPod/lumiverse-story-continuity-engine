@@ -9,12 +9,13 @@ test("configuration bounds and Claude provider alias", () => {
   assert.equal(resolveOutputMode({ provider: "claude" }, "auto"), "anthropic");
 });
 test("tracker forwards user scope, repairs once and has a shared request deadline", async () => {
-  const requests = [];
+  const requests = [], progress = [];
   const api = { connections: { get: async () => ({ provider: "anthropic" }) }, generate: { quiet: async input => { requests.push(input); return requests.length === 1 ? { content: "bad" } : { tool_calls: [{ name: "record_story_state", args: modelOutput(undefined, { initialize: true }) }] }; } } };
-  const state = await runTracker(api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline" }, { connectionId: "tracker" }, "operator-user");
+  const state = await runTracker(api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline", onProgress: event => progress.push(event) }, { connectionId: "tracker" }, "operator-user");
   assert.equal(state.characters[0].name, "Ada"); assert.equal(requests.length, 2);
   assert.equal(requests[0].userId, "operator-user"); assert.equal(requests[0].connection_id, "tracker"); assert.equal(requests[0].signal, requests[1].signal);
   assert.equal(requests[0].tools[0].name, "record_story_state");
+  assert.deepEqual(progress, [{ stage: "generating", attempt: 1 }, { stage: "validating", attempt: 1 }, { stage: "repairing", attempt: 2 }, { stage: "validating", attempt: 2 }]);
 });
 test("failed repair rejects and initialization cannot omit a card character", async () => {
   let calls = 0;

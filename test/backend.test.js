@@ -77,6 +77,9 @@ test("scene filling choice survives interrupted setup and saved defaults are reu
     return { content: JSON.stringify(output) };
   });
   const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 2); assert.equal((await restarted.loadStore("chat")).setupProgress.status, "failed");
+  await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
+  await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "retry", fillMissingSceneDetails: true }, "owner");
   const saved = await restarted.loadStore("chat"); assert.equal(h.requests.length, 3); assert.equal(saved.lastError, "");
   assert.equal(saved.current.world.date, "Day 1, late autumn");
   await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
@@ -310,9 +313,101 @@ test("failed initialization keeps the opening target available for retry without
   assert.deepEqual(h.messages.get("chat"), original);
   assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, "a0");
   assert.equal((await h.engine.loadStore("chat")).current, null);
+  const failure = (await h.engine.status("chat", "owner")).setupProgress;
+  assert.equal(failure.stage, "generating"); assert.equal(failure.status, "failed"); assert.equal(failure.error, "PRIVATE_DIAGNOSTIC_WITH_SECRET");
   h.setResponse(null); await h.engine.schedule("chat", {}, "owner");
+  await h.open(); await h.events.get("MESSAGE_SENT")({ chatId: "chat" }, "owner");
+  await h.engine.handleFrontend({ type: "story_set_widget_visibility", chatId: "chat", showStatusWidget: false }, "owner");
+  assert.equal(h.requests.length, 1); assert.deepEqual((await h.engine.status("chat", "owner")).setupProgress, failure);
+  await h.create();
   assert.deepEqual(h.messages.get("chat"), original);
   assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, null);
+  assert.equal(h.requests.length, 2); assert.equal((await h.engine.status("chat", "owner")).setupProgress.status, "ready");
+});
+
+test("initial setup publishes real reading, generation, validation, repair and saving stages", async () => {
+  const h = harness(); await h.open();
+  h.setResponse(async () => {
+    const progress = (await h.engine.status("chat", "owner")).setupProgress;
+    assert.equal(progress.stage, h.requests.length === 1 ? "generating" : "repairing");
+    assert.equal(progress.attempt, h.requests.length);
+    return { content: h.requests.length === 1 ? "invalid" : JSON.stringify(modelOutput(undefined, { initialize: true })) };
+  });
+  await h.create();
+  const progress = h.sent.map(entry => entry.payload.setupProgress).filter(Boolean);
+  const stages = progress.map(entry => entry.stage).filter((stage, index, entries) => index === 0 || stage !== entries[index - 1]);
+  assert.deepEqual(stages, ["reading", "generating", "validating", "repairing", "validating", "saving", "ready"]);
+  assert.equal(new Set(progress.map(entry => entry.startedAt)).size, 1);
+  const final = (await h.engine.status("chat", "owner")).setupProgress;
+  assert.equal(final.status, "ready"); assert.equal(final.attempt, 2); assert.equal(final.elapsedMs, final.finishedAt - final.startedAt);
+  assert.equal(h.requests.length, 2); assert.equal(h.messages.get("chat").length, 1);
+});
+
+test("a background reconciliation queued during Create cannot start a second failed setup attempt", async () => {
+  const h = harness(); await h.open(); const set = h.api.storage.setJson; let queued;
+  h.api.storage.setJson = async (path, value, options) => {
+    await set(path, value, options);
+    if (!queued && value.chatId === "chat" && value.initializationMode === "create" && !value.baseline && !value.setupProgress) {
+      queued = h.engine.schedule("chat", {}, "owner");
+    }
+  };
+  h.setResponse(async () => { throw new Error("Provider unavailable"); });
+  await h.create(); await queued;
+  assert.equal(h.requests.length, 1); assert.equal((await h.engine.loadStore("chat")).setupProgress.status, "failed");
+});
+
+test("source reading failures report the reading stage and wait for explicit retry", async () => {
+  const h = harness(); await h.open(); const get = h.api.characters.get;
+  const store = await h.engine.loadStore("chat"); store.sources = null; h.files.set(h.engine.pathFor("chat"), store);
+  h.api.characters.get = async () => { throw new Error("Card source unavailable"); };
+  await h.create();
+  const failed = await h.engine.status("chat", "owner");
+  assert.equal(failed.setupProgress.stage, "reading"); assert.equal(failed.setupProgress.error, "Card source unavailable");
+  assert.equal(failed.canCreate, true);
+  assert.equal(h.requests.length, 0);
+  h.api.characters.get = get; await h.open(); assert.equal(h.requests.length, 0);
+  await h.create(); assert.equal(h.requests.length, 1); assert.equal((await h.engine.loadStore("chat")).setupProgress.status, "ready");
+});
+
+test("saving failures retain the valid baseline and retry saving without generating profiles again", async () => {
+  const h = harness(); await h.open(); const set = h.api.variables.chat.set; let fail = true;
+  h.api.variables.chat.set = async (chatId, key, value) => {
+    if (fail && key === CHAT_KEYS.state && value) { fail = false; throw new Error("Mirror write failed"); }
+    return set(chatId, key, value);
+  };
+  await h.create(); const saved = await h.engine.loadStore("chat");
+  assert.ok(saved.baseline); assert.equal(saved.setupProgress.status, "failed"); assert.equal(saved.setupProgress.stage, "saving");
+  await h.open(); assert.equal(h.requests.length, 1); assert.equal((await h.engine.status("chat", "owner")).canCreate, true);
+  await h.create(); const retried = await h.engine.loadStore("chat");
+  assert.equal(h.requests.length, 1); assert.deepEqual(retried.baseline, saved.baseline); assert.equal(retried.setupProgress.status, "ready");
+  assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`));
+});
+
+test("worker interruption and older setup failures remain inspectable until retry", async () => {
+  for (const interrupted of [true, false]) {
+    const h = harness(); await h.open(); const store = await h.engine.loadStore("chat");
+    store.initializationMode = "create";
+    store.lastError = interrupted ? "" : "Older setup validation failed";
+    store.setupProgress = interrupted ? { stage: "generating", status: "running", startedAt: 1000, updatedAt: 2500, finishedAt: null, attempt: 1, error: "" } : null;
+    h.files.set(h.engine.pathFor("chat"), store);
+    const restarted = createStoryEngine(h.api);
+    await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
+    const failed = (await restarted.status("chat", "owner")).setupProgress;
+    assert.equal(failed.status, "failed"); assert.equal(h.requests.length, 0);
+    assert.equal(failed.interrupted, interrupted);
+    if (interrupted) { assert.equal(failed.stage, "generating"); assert.equal(failed.elapsedMs, 1500); assert.match(failed.error, /interrupted/); }
+    else { assert.equal(failed.startedAt, 0); assert.equal(failed.error, store.lastError); }
+    await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "retry" }, "owner");
+    assert.equal(h.requests.length, 1); assert.equal((await restarted.loadStore("chat")).setupProgress.status, "ready");
+  }
+});
+
+test("a failed native setup can be replaced by an import without another model request", async () => {
+  const h = harness(); h.setResponse(async () => { throw new Error("Provider unavailable"); }); await h.select();
+  const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(fixtureState(), new Map(), "initial-setup") };
+  await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", requestId: "import", fileText: JSON.stringify(setup) }, "owner");
+  assert.equal(h.requests.length, 1); assert.equal(h.sent.at(-1).payload.ok, true);
+  assert.equal((await h.engine.loadStore("chat")).setupProgress, null);
 });
 
 test("a committed profile retires setup controls even when later history tracking fails", async () => {

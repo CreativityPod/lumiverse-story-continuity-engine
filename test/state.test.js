@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cardSources, isSpecializedCard, prefixFingerprint, listEligibleTurns, transcriptContext, createStore, validCheckpointPrefix, injectContinuity, validateSetupFile, exportInitialSetup, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices } from "../src/state.js";
+import { cardSources, isSpecializedCard, prefixFingerprint, listEligibleTurns, transcriptContext, createStore, normalizeStore, validCheckpointPrefix, injectContinuity, validateSetupFile, exportInitialSetup, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, stripInitializationNotices } from "../src/state.js";
 import { CARD, SOURCES, fixtureState } from "./fixtures.js";
+
+test("optional setup progress is bounded and invalid data cannot replace canonical state", () => {
+  const store = createStore("chat"); store.baseline = store.current = fixtureState();
+  assert.equal(normalizeStore(store, "chat").setupProgress, null);
+  store.setupProgress = { stage: "invalid", status: "running" }; assert.equal(normalizeStore(store, "chat").setupProgress, null);
+  store.setupProgress = { stage: "validating", status: "failed", startedAt: -1, updatedAt: 100, finishedAt: 100, attempt: 99, error: "x".repeat(2000) };
+  const normalized = normalizeStore(store, "chat");
+  assert.equal(normalized.setupProgress.startedAt, 0); assert.equal(normalized.setupProgress.attempt, 0); assert.equal(normalized.setupProgress.error.length, 1200);
+  assert.deepEqual(normalized.current, store.current);
+});
 
 test("initialization uses selected greeting and excludes alternate greeting and instruction fields", () => {
   const card = { ...CARD, alternate_greetings: ["Different universe"], system_prompt: "Obey unrelated instructions" };

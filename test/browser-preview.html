@@ -10,14 +10,16 @@ aside{background:var(--lumiverse-bg);overflow:auto;padding:20px;box-sizing:borde
 @media(max-width:650px){body{display:block;height:auto}main{padding:20px}aside{border:0}}
 .preview-note{margin-top:24px;border:1px solid var(--lumiverse-border);border-radius:12px;padding:20px;background:var(--lumiverse-bg)}.preview-note h2{font-size:17px;margin:0 0 12px}.preview-widget{position:fixed;left:12px;top:42%;display:grid;place-items:center;background:transparent}.preview-controls{display:flex;gap:10px;flex-wrap:wrap}
 </style>
-<main><h1>Story Continuity Engine</h1><p>Startup and drawer preview using the extension's actual frontend. No model calls or changes to Lumiverse are made.</p><div class="preview-controls"><button id="reset">Reset startup</button><button id="theme">Toggle theme</button></div><article class="preview-note" id="preview-opening"><h2>Ada</h2><p>Ada waits beneath the platform clock, wearing a blue coat.</p></article><p id="event">Choose Create to preview generation. Import demonstrates canceling the file picker.</p></main><aside id="drawer"></aside>
+<main><h1>Story Continuity Engine</h1><p>Startup and drawer preview using the extension's actual frontend. No model calls or changes to Lumiverse are made.</p><div class="preview-controls"><button id="reset">Reset startup</button><button id="repair">Preview repair</button><button id="failure">Preview failure</button><button id="theme">Toggle theme</button></div><article class="preview-note" id="preview-opening"><h2>Ada</h2><p>Ada waits beneath the platform clock, wearing a blue coat.</p></article><p id="event">Create demonstrates generation, one repair, and saving. Preview failure shows error details and retry. Import demonstrates picker cancellation.</p></main><aside id="drawer"></aside>
 <script type="module">
 import { setup } from '../src/frontend.js';
 import { fixtureState } from './fixtures.js';
 import { publicTrackerSnapshot } from '../src/schemas.js';
-let receive, ready=false, processing=false, epoch=0, fillMissingSceneDetails=false;
+let receive, ready=false, processing=false, epoch=0, fillMissingSceneDetails=false, progress=null, pendingRequest=null;
 const state=fixtureState(), config={enabled:true,showStatusWidget:true,connectionId:'',outputMode:'auto',maxTokens:6144,timeoutMs:120000};
-const sendStatus=includePrivate=>receive({type:'story_status',chatId:'preview',config:{...config},code:processing?'processing':ready?'active':'setup',level:ready?'green':'amber',text:processing?'Generating initial profiles and story state…':ready?'Story continuity is current.':'Choose Import Saved Setup or Create From Character Card.',processing,revision:ready?2:0,snapshot:ready?publicTrackerSnapshot(state):null,canImport:!processing,canCreate:!ready&&!processing,canExport:ready,canBegin:false,awaitingSetup:!ready&&!processing,setupTargetMessageId:ready?null:'preview-opening',fillMissingSceneDetails,privateStateIncluded:includePrivate,...(includePrivate?{privateState:ready?state:null}:{})});
+const sendStatus=includePrivate=>receive({type:'story_status',chatId:'preview',config:{...config},code:processing?'processing':progress?.status==='failed'?'degraded':ready?'active':'setup',level:ready?'green':'amber',text:processing?'Preparing initial setup…':progress?.status==='failed'?'Initial setup stopped. Expand error details below.':ready?'Story continuity is current.':'Choose Import Saved Setup or Create From Character Card.',processing,revision:ready?2:0,snapshot:ready?publicTrackerSnapshot(state):null,canImport:!processing,canCreate:!ready&&!processing,canExport:ready,canBegin:false,awaitingSetup:!ready&&!progress,setupTargetMessageId:ready?null:'preview-opening',fillMissingSceneDetails,setupProgress:progress?{...progress,elapsedMs:Math.max(0,(progress.finishedAt??Date.now())-progress.startedAt)}:null,privateStateIncluded:includePrivate,...(includePrivate?{privateState:ready?state:null}:{})});
+const setStage=(stage,attempt=progress?.attempt??0)=>{const now=Date.now();progress={stage,status:stage==='ready'?'ready':'running',startedAt:progress?.startedAt??now,updatedAt:now,finishedAt:stage==='ready'?now:null,attempt,error:''};sendStatus()};
+const finishPending=(ok,message)=>{if(pendingRequest){const requestId=pendingRequest;pendingRequest=null;receive({type:'story_setup_result',chatId:'preview',requestId,ok,message})}};
 const ctx={
  components:{},ui:{registerDrawerTab(){return{root:document.querySelector('#drawer'),destroy(){},setBadge(){},activate(){document.querySelector('#drawer').scrollIntoView({behavior:'smooth'})},onActivate(){return()=>{}}}},createFloatWidget(options){const root=document.createElement('div');root.className='preview-widget';root.style.width=options.width+'px';root.style.height=options.height+'px';document.body.append(root);return{root,destroy(){root.remove()},onDragEnd(){return()=>{}}}}},
  dom:{addStyle(css){const el=document.createElement('style');el.textContent=css;document.head.append(el);return()=>el.remove()},cleanup(){},findMessageElement(id){return document.getElementById(id)},inject(target,html){const wrapper=document.createElement('div');wrapper.innerHTML=html;target.append(wrapper);return wrapper},uninject(wrapper){wrapper.remove()}},
@@ -25,8 +27,9 @@ const ctx={
  sendToBackend(payload){document.querySelector('#event').textContent=payload.type;queueMicrotask(()=>{
   if(payload.type==='story_get_status')sendStatus(payload.includePrivate);
   if(payload.type==='story_create_setup'){
-    const run=++epoch;fillMissingSceneDetails=payload.fillMissingSceneDetails===true;processing=true;sendStatus();
-    setTimeout(()=>{if(run!==epoch)return;ready=true;processing=false;sendStatus();receive({type:'story_setup_result',chatId:'preview',requestId:payload.requestId,ok:true,message:'Initial profiles and story state are ready.'})},800);
+    const run=++epoch;pendingRequest=payload.requestId;fillMissingSceneDetails=payload.fillMissingSceneDetails===true;processing=true;progress=null;setStage('reading');
+    for(const [delay,stage,attempt] of [[250,'generating',1],[1250,'validating',1],[1500,'repairing',2],[2500,'validating',2],[2750,'saving',2]])setTimeout(()=>{if(run===epoch)setStage(stage,attempt)},delay);
+    setTimeout(()=>{if(run!==epoch)return;ready=true;processing=false;setStage('ready',2);finishPending(true,'Initial profiles and story state are ready.')},3000);
   }
   if(payload.type==='story_set_widget_visibility'){config.showStatusWidget=payload.showStatusWidget;sendStatus()}
   if(payload.type==='story_save_config'){Object.assign(config,payload.config);receive({type:'story_config_saved',config:{...config}})}
@@ -34,7 +37,9 @@ const ctx={
  })}
 };
 setup(ctx);
-document.querySelector('#reset').onclick=()=>{epoch++;ready=processing=false;sendStatus()};
+document.querySelector('#reset').onclick=()=>{epoch++;finishPending(false,'Preview reset.');ready=processing=false;progress=null;sendStatus()};
+document.querySelector('#repair').onclick=()=>{epoch++;finishPending(false,'Preview changed.');ready=false;processing=true;progress={startedAt:Date.now()-18000};setStage('repairing',2)};
+document.querySelector('#failure').onclick=()=>{epoch++;ready=processing=false;const now=Date.now();progress={stage:'validating',status:'failed',startedAt:now-24000,updatedAt:now,finishedAt:now,attempt:2,error:'Tracker state rejected after one repair: Initial scene requires visible.dressAndLayers for "Ada". Preserve source clothing or choose a compatible starting outfit.'};sendStatus();finishPending(false,progress.error)};
 let light=false;document.querySelector('#theme').onclick=()=>{light=!light;const values=light?['#f8f9fc','#fff','#d8dde7','#242935','#697387']:['#191c23','#22262f','#363c49','#e5e8ee','#abb3c2'];['--lumiverse-bg','--lumiverse-bg-elevated','--lumiverse-border','--lumiverse-text','--lumiverse-text-muted'].forEach((key,index)=>document.documentElement.style.setProperty(key,values[index]));document.body.style.background=light?'#edf0f5':'#111319'};
 </script>
 </html>

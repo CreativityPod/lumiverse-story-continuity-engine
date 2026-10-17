@@ -104,7 +104,7 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
     initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    initializationMode: "", fillMissingSceneDetails: false, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
+    initializationMode: "", fillMissingSceneDetails: false, setupProgress: null, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
 export function normalizeStore(value, chatId) {
@@ -112,6 +112,17 @@ export function normalizeStore(value, chatId) {
   if (!value || value.schemaVersion !== 1 || value.chatId !== chatId) return empty;
   const next = { ...empty, ...value, processing: false };
   next.fillMissingSceneDetails = value.fillMissingSceneDetails === true;
+  const progress = value.setupProgress;
+  next.setupProgress = progress && ["setup", "reading", "generating", "validating", "repairing", "saving", "ready"].includes(progress.stage)
+    && ["running", "failed", "ready"].includes(progress.status) ? {
+      stage: progress.stage, status: progress.status,
+      startedAt: Number.isFinite(progress.startedAt) && progress.startedAt > 0 ? progress.startedAt : 0,
+      updatedAt: Number.isFinite(progress.updatedAt) && progress.updatedAt > 0 ? progress.updatedAt : 0,
+      finishedAt: Number.isFinite(progress.finishedAt) && progress.finishedAt > 0 ? progress.finishedAt : null,
+      attempt: [1, 2].includes(progress.attempt) ? progress.attempt : 0,
+      interrupted: progress.interrupted === true,
+      error: typeof progress.error === "string" ? progress.error.slice(0, 1200) : "",
+    } : null;
   next.rejectedTurn = typeof value.rejectedTurn?.signature === "string" && typeof value.rejectedTurn?.error === "string"
     ? { signature: value.rejectedTurn.signature, error: value.rejectedTurn.error.slice(0, 450) } : null;
   next.initializationMode = value.initializationMode === "create" || value.baseline || value.revision > 0 ? "create" : "";

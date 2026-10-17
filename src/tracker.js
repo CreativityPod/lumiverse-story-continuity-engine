@@ -69,6 +69,7 @@ export function generationParameters(connection, config, schema = TRACKER_OUTPUT
 }
 
 export async function runTracker(api, input, rawConfig, userId) {
+  await input.onProgress?.({ stage: "generating", attempt: 1 });
   const config = normalizeConfig(rawConfig);
   let connection = null;
   if (config.connectionId) {
@@ -97,7 +98,9 @@ export async function runTracker(api, input, rawConfig, userId) {
   };
   let diagnostic = "";
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await input.onProgress?.({ stage: "repairing", attempt: 2 });
     const response = await api.generate.quiet(request(messages));
+    await input.onProgress?.({ stage: "validating", attempt: attempt + 1 });
     const tool = response?.tool_calls?.find(call => call.name === "record_story_state");
     const parsed = extractJson(tool?.args ?? response?.content);
     try {

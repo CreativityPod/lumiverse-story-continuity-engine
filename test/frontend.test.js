@@ -178,6 +178,46 @@ test("backend setup status restores progress and retry controls", () => {
   } finally { h.restore(); }
 });
 
+test("setup stages show elapsed time, keep errors expandable, and stop timers on completion and navigation", t => {
+  let now = 100000, sequence = 0; const intervals = new Map();
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "setInterval", callback => { intervals.set(++sequence, callback); return sequence; });
+  t.mock.method(globalThis, "clearInterval", id => intervals.delete(id));
+  const h = mountHarness();
+  try {
+    const bubble = h.message("opening");
+    const progress = { stage: "generating", status: "running", startedAt: 90000, updatedAt: now, attempt: 1, elapsedMs: 10000, error: "" };
+    showStartup(h, { code: "processing", processing: true, canCreate: false, canImport: false, setupProgress: progress });
+    const inline = bubble.querySelector('.sce-setup-progress'), drawer = document.querySelector('.sce-panel .sce-setup-progress');
+    assert.ok(inline.textContent.includes("Generating profiles and starting state"));
+    assert.equal(inline.querySelector('[aria-label="Elapsed setup time"]').textContent, "10s elapsed"); assert.equal(intervals.size, 1);
+    const requests = h.sent.length; now += 2000; for (const tick of intervals.values()) tick();
+    assert.equal(inline.querySelector('[aria-label="Elapsed setup time"]').textContent, "12s elapsed"); assert.equal(h.sent.length, requests);
+    showStartup(h, { code: "processing", processing: true, canCreate: false, setupProgress: { ...progress, stage: "repairing", attempt: 2, elapsedMs: 12000 } });
+    assert.ok(inline.textContent.includes("Repairing rejected output")); assert.equal(intervals.size, 1);
+    const failure = { ...progress, status: "failed", stage: "validating", attempt: 2, elapsedMs: 12000, finishedAt: now, error: 'Invalid outfit <img src="x" onerror="alert(1)">' };
+    showStartup(h, { code: "degraded", setupProgress: failure });
+    const details = inline.querySelector('details');
+    assert.ok(inline.textContent.includes("Failed while validating repaired response")); assert.equal(details.open, false); assert.equal(details.hidden, false);
+    assert.equal(inline.querySelector('img'), null); assert.equal(intervals.size, 0);
+    details.open = true; showStartup(h, { code: "degraded", setupProgress: failure }); assert.equal(details.open, true);
+    assert.equal(h.button("Retry Setup").disabled, false); h.button("Retry Setup").click();
+    const retry = h.sent.at(-1); assert.equal(retry.type, "story_create_setup"); assert.equal(retry.chatId, "chat");
+    h.backend({ type: "story_setup_result", chatId: "chat", requestId: retry.requestId, ok: false, message: failure.error });
+    assert.ok(document.body.textContent.includes("Expand error details, then select Retry Setup"));
+    now += 1000;
+    showStartup(h, { code: "processing", processing: true, canCreate: false, setupProgress: { ...progress, stage: "reading", startedAt: now, elapsedMs: 0 } });
+    assert.equal(details.open, false); assert.equal(details.hidden, true); assert.equal(inline.querySelector('pre').textContent, "");
+    h.status({ canCreate: false, setupTargetMessageId: null, setupProgress: { ...progress, status: "ready", stage: "ready", elapsedMs: 20000, finishedAt: now } });
+    assert.equal(bubble.querySelector('.sce-setup-progress'), null); assert.ok(drawer.textContent.includes("Initial setup ready"));
+    assert.equal(drawer.querySelector('[aria-label="Elapsed setup time"]').textContent, "Completed in 20s"); assert.equal(intervals.size, 0);
+    showStartup(h, { setupProgress: { ...progress, stage: "reading", startedAt: now, elapsedMs: 0 } }); assert.equal(intervals.size, 1);
+    h.events.get("CHAT_SWITCHED")({ chatId: null }); assert.equal(intervals.size, 0); assert.equal(drawer.hidden, true); assert.equal(drawer.querySelector('pre').textContent, "");
+    h.status({ setupProgress: failure }); assert.equal(drawer.hidden, true);
+  } finally { h.restore(); }
+  assert.equal(intervals.size, 0);
+});
+
 test("inline import shares the drawer picker and ignores files selected after navigation", async () => {
   const h = mountHarness();
   try {

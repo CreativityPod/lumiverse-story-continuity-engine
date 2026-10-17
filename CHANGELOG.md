@@ -1,3 +1,10 @@
+# 1.5.2
+
+- Initial setup reports reading cards/lore, generating, validating, repairing when needed, saving, and readiness in the chat controls and drawer, with locally updated elapsed time.
+- Failures retain their stage, stopped time and expandable error details; Create becomes **Retry Setup**. Status checks, navigation, events and settings changes no longer restart failed initialization.
+- Interrupted runs and older failures remain inspectable across restarts. Retry uses the current choices/sources; an already valid baseline can finish saving without another profile generation.
+- Progress stays outside story messages, canonical state and portable setups. Inline controls still retire after profile readiness, and successful imports recover locally without generation.
+
 # 1.5.1
 
 - New card setups automatically fill entirely missing outfits for model-controlled characters, alongside date, time and weather, in the existing initialization request.

@@ -17,6 +17,7 @@ export function createStoryEngine(api) {
   const send = (payload, userId) => api.sendToFrontend(payload, userId);
   const required = ["generation", "interceptor", "chat_mutation", "characters", "chats"];
   const rejectionRetryHint = " Automatic retries are paused for this turn. Use Reprocess Latest Turn to retry.";
+  const interruptedSetupError = "Initial setup was interrupted. Inspect the last stage, then select Retry Setup to start again.";
   const selection = userId => selected.get(userKey(userId));
   function adopt(chatId, userId) { const id = typeof chatId === "string" && chatId ? chatId : null; selected.set(userKey(userId), id); if (id) users.set(id, userId); return id; }
   function requestChat(payload, userId) {
@@ -65,18 +66,22 @@ export function createStoryEngine(api) {
     const store = chatId ? await loadStore(chatId) : null;
     const missing = required.filter(permission => !has(permission));
     const busy = chatId && processing.has(chatId);
-    const code = !chatId ? "idle" : missing.length ? "permissions" : !config.enabled ? "disabled" : store.blocked ? "specialized" : busy ? "processing" : store.lastError ? "degraded" : store.awaitingSetup ? "setup" : store.current ? "active" : "ready";
+    let setupProgress = store?.setupProgress && { ...store.setupProgress };
+    if (setupProgress?.status === "running" && !busy) setupProgress = { ...setupProgress, status: "failed", error: interruptedSetupError, finishedAt: setupProgress.updatedAt, interrupted: true };
+    if (setupProgress) setupProgress.elapsedMs = setupProgress.startedAt ? Math.max(0, (setupProgress.finishedAt ?? Date.now()) - setupProgress.startedAt) : 0;
+    const code = !chatId ? "idle" : missing.length ? "permissions" : !config.enabled ? "disabled" : store.blocked ? "specialized" : busy ? "processing" : store.lastError || setupProgress?.status === "failed" ? "degraded" : store.awaitingSetup ? "setup" : store.current ? "active" : "ready";
     const text = { idle: "Open a character chat to begin.", permissions: `Grant required permissions: ${missing.join(", ")}.`, disabled: "Story continuity tracking is disabled.",
-      specialized: store?.blocked, processing: "Updating character and world continuity…", degraded: store?.lastError,
+      specialized: store?.blocked, processing: "Updating character and world continuity…", degraded: setupProgress?.status === "failed" ? "Initial setup stopped. Expand error details below." : store?.lastError,
       setup: "Choose Import Saved Setup or Create From Character Card.", active: "Story continuity is current.", ready: "Checking story setup…" }[code];
     const payload = { type: "story_status", chatId, config, code, text, processing: Boolean(busy), level: code === "active" ? "green" : "amber",
       revision: store?.revision ?? 0, lastRevisionAt: store?.lastRevisionAt ?? "", cardChanged: Boolean(store?.pendingCardFingerprint),
       snapshot: store && !store.blocked ? publicTrackerSnapshot(store.current) : null, canExport: Boolean(store?.initialSetup),
       canBegin: Boolean(store?.canBegin && !busy && !generating.has(chatId)),
       canImport: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.importable && !store?.blocked),
-      canCreate: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.sources && !store.baseline && !store.blocked && !store.epoch.startsWith("import:")),
+      canCreate: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && (store?.sources || setupProgress?.status === "failed") && (!store.baseline || setupProgress?.status === "failed") && !store.blocked && !store.epoch.startsWith("import:")),
       awaitingSetup: Boolean(store?.awaitingSetup), setupTargetMessageId: store?.setupTargetMessageId ?? null,
       fillMissingSceneDetails: store?.fillMissingSceneDetails === true,
+      setupProgress: setupProgress ?? null,
       privateStateIncluded: includePrivate };
     if (includePrivate && store && !store.blocked) payload.privateState = store.current;
     return payload;
@@ -85,6 +90,14 @@ export function createStoryEngine(api) {
     const payload = await status(chatId, userId, includePrivate);
     if ((selection(userId) ?? null) === chatId) send(payload, userId);
     return payload;
+  }
+  async function setupStage(store, stage, userId, { attempt = store.setupProgress?.attempt ?? 0, error = "", start = false, interrupted = false, unknownStart = false } = {}) {
+    const now = Date.now(), previous = start ? null : store.setupProgress;
+    const status = error ? "failed" : stage === "ready" ? "ready" : "running";
+    store.setupProgress = { stage, status, startedAt: unknownStart ? 0 : previous?.startedAt ?? now, updatedAt: now,
+      finishedAt: status === "running" ? null : interrupted ? previous?.updatedAt ?? now : now,
+      attempt, interrupted, error: error.slice(0, 1200) };
+    await saveStore(store); await publish(store.chatId, userId);
   }
   async function matches(chatId, messages, index) {
     if (deleted.has(chatId)) return false;
@@ -126,27 +139,48 @@ export function createStoryEngine(api) {
     let store = await loadStore(chatId);
     processing.add(chatId);
     const deadline = Date.now() + 240000;
-    let initializationNotice = null, trackerAttempt = null;
+    let initializationNotice = null, trackerAttempt = null, setupRun = false;
     try {
       const messages = await api.chat.getMessages(chatId);
       rememberNotices(chatId, messages);
       initializationNotice = messages.find(isInitializationNotice) ?? null;
       if (initializationNotice) { store.setupNoticeId = initializationNotice.id; store.setupNoticeShown = true; }
       else store.setupNoticeId = null;
+      const context = transcriptContext(messages), turns = listEligibleTurns(messages, context);
+      if (!context.anchor) {
+        if (store.setupProgress?.status === "running") {
+          store.lastError = interruptedSetupError;
+          await setupStage(store, store.setupProgress.stage, userId, { error: store.lastError, interrupted: true });
+        } else if (!store.baseline && store.initializationMode === "create" && store.lastError && !store.setupProgress
+          && !store.lastError.startsWith("Invalid saved state was discarded")) {
+          await setupStage(store, "setup", userId, { error: store.lastError, unknownStart: true });
+        }
+        if (store.setupProgress?.status === "failed" && !options.retrySetup) {
+          const narrative = messages.filter(message => ["assistant", "user"].includes(message.role) && !isInitializationNotice(message)
+            && !message.metadata?.story_continuity_setup && contentToText(message.content).trim());
+          store.setupTargetMessageId = store.baseline ? null : (narrative.find(message => message.role === "assistant") ?? narrative[0])?.id ?? null;
+          store.importable = !messages.some(message => message.role === "user");
+          await saveStore(store); return;
+        }
+        if (options.retrySetup || !store.baseline && store.initializationMode === "create") {
+          setupRun = true; await setupStage(store, "reading", userId, { start: true, attempt: 0 });
+        }
+      }
       const { cards, sources } = await getSources(chatId, messages, userId);
       if (isSpecializedCard(cards, messages)) {
         store.blocked = "This Date Simulator/Storyteller chat belongs to Date Simulator Continuity Engine.";
         store.current = null; store.lastError = ""; store.setupTargetMessageId = null;
+        store.setupProgress = null;
         await saveStore(store); await mirror(store); return;
       }
       store.blocked = "";
-      const context = transcriptContext(messages), turns = listEligibleTurns(messages, context);
       const epoch = context.anchor ? `import:${context.anchor.id}` : `cards:${cards.map(card => card.id).join(",")}`;
       const currentFingerprint = fingerprint(sources);
       const openingChanged = !context.anchor && store.sources && store.sources.selectedOpening !== sources.selectedOpening;
       if (store.epoch !== epoch || openingChanged || options.refreshCards && !context.anchor) {
         const { revision, lastRevisionAt, initializationMode, fillMissingSceneDetails, setupNoticeId, setupNoticeShown } = store;
-        store = { ...createStore(chatId), revision, lastRevisionAt, epoch, initializationMode, fillMissingSceneDetails, setupNoticeId, setupNoticeShown };
+        const setupProgress = setupRun ? store.setupProgress : null;
+        store = { ...createStore(chatId), revision, lastRevisionAt, epoch, initializationMode, fillMissingSceneDetails, setupProgress, setupNoticeId, setupNoticeShown };
       }
       // A deleted import anchor must discard all imported state, including its baseline.
       if (context.anchor && (!store.baseline || store.sourceFingerprint !== context.anchor.fingerprint)) {
@@ -155,6 +189,7 @@ export function createStoryEngine(api) {
         store.baseline = remapStateSources(context.anchor.setup.initialState, new Map(), context.anchor.id);
         store.initialSetup = { key: "", fingerprint: context.anchor.fingerprint, state: store.baseline };
         store.checkpoints = {};
+        store.setupProgress = null;
       } else if (!context.anchor) {
         if (store.sources && store.sourceFingerprint !== currentFingerprint) store.pendingCardFingerprint = currentFingerprint;
         if (!store.sources || !store.baseline) { store.sources = sources; store.sourceFingerprint = currentFingerprint; store.pendingCardFingerprint = ""; }
@@ -186,6 +221,9 @@ export function createStoryEngine(api) {
         return;
       }
       store.awaitingSetup = false;
+      if (!context.anchor && !store.baseline && !setupRun) {
+        setupRun = true; await setupStage(store, "reading", userId, { start: true, attempt: 0 });
+      }
       let prefix = validCheckpointPrefix(store, turns);
       if (options.reprocess && prefix.count && prefix.count === turns.length) {
         delete store.checkpoints[turns.at(-1).key];
@@ -194,17 +232,21 @@ export function createStoryEngine(api) {
       store.current = prefix.previousState;
       store.checkpoints = prefix.checkpoints;
       store.lastError = "";
+      if (setupRun && store.baseline) await setupStage(store, "saving", userId);
       await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
+      if (setupRun && store.baseline) await setupStage(store, "ready", userId);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, fillMissingSceneDetails: store.fillMissingSceneDetails,
-          sourceMessageId: "card-baseline", remainingMs: remaining() }, config, userId);
+          sourceMessageId: "card-baseline", remainingMs: remaining(), onProgress: progress => setupStage(store, progress.stage, userId, progress) }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
         const freshMessages = await api.chat.getMessages(chatId);
         const fresh = await getSources(chatId, freshMessages, userId);
         if (fingerprint(fresh.sources) !== currentFingerprint || deleted.has(chatId)) throw new Error("Card or opening changed during initialization; retry on the selected state.");
+        await setupStage(store, "saving", userId);
         store.baseline = baseline; store.current = baseline; store.setupTargetMessageId = null; commitRevision(store);
         await saveStore(store); await mirror(store);
+        await setupStage(store, "ready", userId);
       }
       let previousState = prefix.previousState ?? store.baseline;
       for (let index = prefix.count; index < turns.length; index++) {
@@ -236,6 +278,7 @@ export function createStoryEngine(api) {
       await saveStore(store);
     } catch (error) {
       store.lastError = String(error?.message ?? error).slice(0, 600);
+      if (setupRun && store.setupProgress?.status === "running") await setupStage(store, store.setupProgress.stage, userId, { error: store.lastError });
       if (trackerAttempt && error?.code === "TRACKER_STATE_REJECTED") {
         store.rejectedTurn = { signature: trackerAttempt, error: store.lastError.slice(0, 450) };
         store.lastError = store.rejectedTurn.error + rejectionRetryHint;
@@ -391,17 +434,20 @@ export function createStoryEngine(api) {
         await enqueue(chatId, async () => {
           const config = await loadConfig(), store = await loadStore(chatId);
           if (!config.enabled || required.some(permission => !has(permission))) throw new Error("Enable tracking and grant the required permissions before creating a setup.");
-          const messages = await api.chat.getMessages(chatId), { cards } = await getSources(chatId, messages, userId);
-          if (isSpecializedCard(cards, messages)) throw new Error("Use Date Simulator Continuity Engine for this card.");
+          const messages = await api.chat.getMessages(chatId);
+          if (isSpecializedCard([], messages)) throw new Error("Use Date Simulator Continuity Engine for this card.");
           if (transcriptContext(messages).anchor) throw new Error("A saved setup is already loaded.");
           if (selection(userId) !== chatId || generating.has(chatId)) throw new Error("Open the intended chat and wait for the current response to finish.");
           store.initializationMode = "create"; store.awaitingSetup = false; store.lastError = "";
+          store.setupProgress = null;
           if (!store.baseline) store.fillMissingSceneDetails = payload.fillMissingSceneDetails === true;
           await saveStore(store);
+          // Keep the choice and its attempt in one queue operation so a queued
+          // status/event cannot start an extra attempt between them.
+          await reconcile(chatId, { retrySetup: true }, userId);
         });
-        await schedule(chatId, {}, userId);
         const store = await loadStore(chatId);
-        if (store.lastError || !store.current) throw new Error(store.lastError || "The initial story state could not be created.");
+        if (store.lastError || !store.current) throw new Error(store.lastError || store.blocked || "The initial story state could not be created.");
         send({ type: "story_setup_result", chatId, requestId: payload.requestId, ok: true, message: "Initial profiles and story state are ready." }, userId);
       } else if (type === "story_reprocess" || type === "story_refresh_cards") {
         await schedule(chatId, { reprocess: type === "story_reprocess", refreshCards: type === "story_refresh_cards", includePrivate: payload.includePrivate }, userId);
@@ -444,7 +490,18 @@ export function createStoryEngine(api) {
         try { await api.chat.appendMessage(chatId, { role: "user", content: "/story-begin\nPresent the current observable starting scene from saved continuity. Do not advance time, recast characters, or reveal private information.", metadata: { story_continuity_observation: true } }, { triggerGeneration: true }); }
         finally { beginning.delete(chatId); }
       }
-    } catch (error) { send({ type: type.includes("setup") ? "story_setup_result" : "story_action_result", chatId, requestId: payload.requestId, ok: false, message: String(error?.message ?? error) }, userId); }
+    } catch (error) {
+      if (type === "story_create_setup") {
+        try {
+          const store = await loadStore(chatId);
+          if (!store.current && !store.blocked && store.setupProgress?.status !== "failed") {
+            store.lastError = String(error?.message ?? error).slice(0, 600);
+            await setupStage(store, "setup", userId, { error: store.lastError, start: true, attempt: 0 });
+          }
+        } catch { api.log.warn("Initial setup failure details could not be saved."); }
+      }
+      send({ type: type.includes("setup") ? "story_setup_result" : "story_action_result", chatId, requestId: payload.requestId, ok: false, message: String(error?.message ?? error) }, userId);
+    }
   }
 
   register();
