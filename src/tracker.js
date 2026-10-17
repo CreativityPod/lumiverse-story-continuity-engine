@@ -1,7 +1,7 @@
 import { TRACKER_OUTPUT_JSON_SCHEMA, TrackerScopeError, materializeTrackerOutput, trackerStateForLlm } from "./schemas.js";
 import { buildRoutineTrackerContext } from "./context.js";
 import { createAliasRegistry, encodeModelState, encodeModelSources, encodeModelReferences, modelAliasCatalog, aliasOutputSchema, decodeModelOutput } from "./aliases.js";
-import { TRACKER_CONTRACT_VERSION, TRACKER_COLLECTIONS, TrackerValidationError } from "./protocol.js";
+import { TRACKER_CONTRACT_VERSION, TRACKER_COLLECTIONS, TrackerValidationError, trackerFieldPaths } from "./protocol.js";
 import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 
 export const DEFAULT_CONFIG = Object.freeze({ enabled: true, showStatusWidget: true, connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000 });
@@ -101,23 +101,45 @@ export function inspectTrackerResponse(response, mode) {
 function targetedRepairPlan(parsed, error, registry) {
   if (!(error instanceof TrackerValidationError) || !error.issues.length) return null;
   const targets = Object.fromEntries(["world", ...TRACKER_COLLECTIONS].map(kind => [kind, new Set()]));
+  const fields = new Map();
   for (const issue of error.issues) {
-    if (issue.kind === "world") { targets.world.add("world"); continue; }
-    const record = registry.reverse.get(issue.recordId) ?? registry.creation.get(issue.recordId);
-    if (!record || record.kind !== issue.kind || !Array.isArray(parsed[issue.kind])) return null;
-    targets[issue.kind].add(issue.recordId);
+    if (issue.kind === "world") targets.world.add("world");
+    else {
+      const record = registry.reverse.get(issue.recordId) ?? registry.creation.get(issue.recordId);
+      if (!record || record.kind !== issue.kind || !Array.isArray(parsed[issue.kind])) return null;
+      targets[issue.kind].add(issue.recordId);
+    }
+    const key = `${issue.kind}:${issue.recordId}`, field = issue.path.replace(/^(?:world\.|[a-z]+\[\d+\]\.)/, "");
+    if (!trackerFieldPaths(issue.kind).includes(field)) fields.set(key, null);
+    else if (fields.get(key) !== null) {
+      if (!fields.has(key)) fields.set(key, new Set());
+      fields.get(key).add(field);
+    }
   }
-  return targets;
+  return { targets, fields };
 }
 
-function mergeTrackerRepair(original, repaired, targets, registry) {
-  if (!targets) return repaired;
+function mergeTrackerRepair(original, repaired, plan, registry) {
+  if (!plan) return repaired;
+  const { targets, fields } = plan;
   if (!repaired || typeof repaired !== "object" || Array.isArray(repaired)) throw new Error("Repair must return a JSON object");
   if (repaired.schemaVersion !== 2 || Object.keys(repaired).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Repair has an unsupported schema version or unexpected root fields");
   const merged = structuredClone(original);
+  const replaceRecord = (prior, replacement, kind, id) => {
+    const rejectedFields = fields.get(`${kind}:${id}`);
+    if (!rejectedFields?.size || !prior || !Array.isArray(replacement.changes) || replacement.action !== "update") return replacement;
+    const priorChanges = Array.isArray(prior.changes) ? prior.changes : trackerFieldPaths(kind).flatMap(field => {
+      let value = prior;
+      for (const key of field.split(".")) value = value?.[key];
+      return value === undefined ? [] : [{ field, value }];
+    });
+    const replaced = new Set(replacement.changes.map(change => change.field));
+    for (const field of rejectedFields) if (!replaced.has(field)) throw new Error(`Repair omitted rejected field ${kind}.${field}; return an explicit valid value`);
+    return { ...replacement, changes: [...priorChanges.filter(change => !replaced.has(change.field)), ...replacement.changes] };
+  };
   if (targets.world.size) {
     if (!repaired.world || repaired.world.action !== "update") throw new Error("Repair must replace the rejected world changes");
-    merged.world = repaired.world;
+    merged.world = replaceRecord(original.world, repaired.world, "world", "world");
   }
   for (const kind of TRACKER_COLLECTIONS) {
     const replacements = repaired[kind] ?? [];
@@ -133,7 +155,8 @@ function mergeTrackerRepair(original, repaired, targets, registry) {
       const id = entry.id.trim();
       const identity = registry.reverse.get(id) ?? registry.creation.get(id);
       if (!identity || identity.kind !== kind) throw new Error(`Repair ${kind} contains an unknown or wrong-type alias ${JSON.stringify(id)}`);
-      if (targets[kind].has(id) || !retainedIds.has(id) && registry.creation.get(id)?.kind === kind) retained.push(entry);
+      if (targets[kind].has(id)) retained.push(replaceRecord(original[kind].find(candidate => candidate.id?.trim() === id), entry, kind, id));
+      else if (!retainedIds.has(id) && registry.creation.get(id)?.kind === kind) retained.push(entry);
     }
     merged[kind] = retained;
   }
@@ -174,7 +197,8 @@ export async function runTracker(api, input, rawConfig, userId) {
       : `INITIALIZE FROM CARD SOURCES. Extract the stable profiles, appearance, initial internal state, recurring characters, and opening scene. Include every card character with its supplied c alias. Do not invent a user profile.\n${JSON.stringify(encodeModelSources(input.sources, registry))}`
     : `PREVIOUS SELECTED PRIVATE STATE (includes extracted stable profiles; omitted entities remain saved)\n${JSON.stringify(encodeModelState(routine.state, registry))}\nTARGETED ORIGINAL SOURCE REFERENCES (only relevant facts not covered by extracted profiles; current state takes precedence)\n${JSON.stringify(encodeModelReferences(routine.references, registry))}\nCOMPLETED USER TURN\n${registry.rewriteText(input.userText || "[none]")}\nCOMPLETED ASSISTANT TURN${input.isOpening ? " (selected opening; do not advance its starting clock again)" : ""}\n${registry.rewriteText(input.assistantText)}`;
   const scenePolicy = input.initialize && !input.refreshProfiles ? initialScenePolicy(input.fillMissingSceneDetails === true) : "";
-  const messages = [{ role: "system", content: `${TRACKER_SYSTEM_PROMPT}${scenePolicy ? `\n${scenePolicy}` : ""}\nRETURN SCHEMA\n${JSON.stringify(schema)}` }, { role: "user", content: `${content}\n${catalog}` }];
+  const choices = "CONTROLLED VALUES: world sceneStatus must be active or ended (active for an ongoing/opening scene; ended only when the scene explicitly ends). Objective status must be active, completed or abandoned. Never use Unknown or a description for these status fields; omit an unsupported change instead. Character role/controller come from the supplied identity.";
+  const messages = [{ role: "system", content: `${TRACKER_SYSTEM_PROMPT}\n${choices}${scenePolicy ? `\n${scenePolicy}` : ""}\nRETURN SCHEMA\n${JSON.stringify(schema)}` }, { role: "user", content: `${content}\n${catalog}` }];
   // One shared deadline covers both the original attempt and its single repair.
   const signal = AbortSignal.timeout(Math.min(config.timeoutMs, input.remainingMs ?? config.timeoutMs));
   const request = attempt => {
@@ -201,11 +225,12 @@ export async function runTracker(api, input, rawConfig, userId) {
     const inspected = inspectTrackerResponse(response, resolveOutputMode(connection, config.outputMode));
     const detail = { attempt: attempt + 1, category: inspected.category, ...inspected.metadata, elapsedMs: Date.now() - started, issues: [], excerpt: "" };
     diagnostics.attempts.push(detail);
-    let parsed = inspected.parsed;
+    let parsed = inspected.parsed, candidateState = null;
     try {
       if (inspected.message) throw new Error(inspected.message);
       if (attempt) parsed = mergeTrackerRepair(repairOriginal, parsed, repairTargets, registry);
-      const state = materializeTrackerOutput(decodeModelOutput(parsed, registry), input.previousState, input.sourceMessageId, scope);
+      const state = materializeTrackerOutput(decodeModelOutput(parsed, registry, { sourceMessageId: input.sourceMessageId }), input.previousState, input.sourceMessageId, scope);
+      candidateState = state;
       for (const card of input.sources.cards) if (!state.characters.some(char => char.id === `char:${card.id}` && char.role === "main")) throw new Error("Every card character must be recorded with its exact id and main role");
       if (scenePolicy) {
         const missing = ["date", "time", "weather"].filter(key => state.world[key].trim().toLowerCase() === "unknown").map(key => `world.${key}`);
@@ -222,12 +247,16 @@ export async function runTracker(api, input, rawConfig, userId) {
       detail.category = inspected.message ? inspected.category : "state_validation";
       detail.issues = error.issues ?? [{ path: "state", code: "state_validation", message: diagnostic }];
       detail.excerpt = inspected.rawText;
+      if (input.initialize && !input.refreshProfiles) {
+        const preview = error.preview ?? (candidateState ? { state: candidateState, unavailableFields: [] } : null);
+        if (preview?.state.characters.length) await input.onSetupPreview?.(preview);
+      }
       const scopeRepair = error instanceof TrackerScopeError
         ? ` Reference-only records rejected: ${registry.rewriteText(JSON.stringify(error.violations))}. Remove ALL listed records from their collections; their saved facts remain intact. Do not recreate them with creation aliases.` : "";
       if (attempt === 0) {
         repairOriginal = parsed;
         repairTargets = targetedRepairPlan(parsed, error, registry);
-        const repairScope = repairTargets ? `TARGETED REPAIR: replace every listed rejected record; do not omit any. Other validated records and their declarations are retained locally. Return only replacements and required new character declarations. Targets: ${JSON.stringify(Object.fromEntries(Object.entries(repairTargets).map(([kind, ids]) => [kind, [...ids]])))}.`
+        const repairScope = repairTargets ? `TARGETED REPAIR: replace every listed rejected record; do not omit any. Other validated records, declarations and unaffected field changes are retained locally. Include explicit corrected values for every rejected field. Return only replacements and required new character declarations. Targets: ${JSON.stringify(Object.fromEntries(Object.entries(repairTargets.targets).map(([kind, ids]) => [kind, [...ids]])))}.`
           : "Return a complete replacement, retaining all valid supported changes from the rejected response.";
         messages.push({ role: "assistant", content: registry.rewriteText(inspected.rawText.slice(0, 128000)) || "[The prior response was empty.]" },
           { role: "user", content: `Repair the rejected state: ${diagnostic}\nALL VALIDATION ISSUES\n${registry.rewriteText(JSON.stringify(detail.issues))}\n${scopeRepair}\n${repairScope}\nReturn only entity records whose catalog entry has canUpdate true, plus genuinely new entities using supplied creation aliases. Declare every new referenced character. Existing character aliases and names: ${JSON.stringify(modelAliasCatalog(registry).existing.characters)}. Never guess an identity or invent a missing character to justify an invalid relationship. Return one compact schema-conforming JSON object with all root collections (empty arrays are allowed). Preserve prior facts; unsupported facts remain Unknown${scenePolicy ? " outside the authorized initial scene defaults" : ""}.` });
@@ -239,4 +268,13 @@ export async function runTracker(api, input, rawConfig, userId) {
   const last = diagnostics.attempts.at(-1);
   throw Object.assign(new Error(`Tracker state rejected after one repair: ${diagnostic}; finish=${last.finishReason}; contentChars=${last.contentChars}; toolCalls=${last.toolCalls}`),
     { code: "TRACKER_STATE_REJECTED", diagnostics: normalizeTrackerDiagnostics(diagnostics) });
+}
+
+export function recoverSetupPreview(raw, sources) {
+  const parsed = extractJson(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  try {
+    const state = materializeTrackerOutput(decodeModelOutput(parsed, createAliasRegistry(sources)), null, "card-baseline");
+    return state.characters.length ? { state, unavailableFields: [] } : null;
+  } catch (error) { return error.preview?.state.characters.length ? error.preview : null; }
 }

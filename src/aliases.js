@@ -1,4 +1,4 @@
-import { TRACKER_OUTPUT_JSON_SCHEMA, validateTrackerRecord, cloneEmptyState } from "./schemas.js";
+import { TRACKER_OUTPUT_JSON_SCHEMA, validateTrackerRecord, cloneEmptyState, partialTrackerPreview } from "./schemas.js";
 import { TRACKER_COLLECTIONS, TrackerValidationError, expandTrackerRecord, trackerPatchRecordSchema } from "./protocol.js";
 
 const ALIAS_LIMITS = { characters: 24, places: 32, relationships: 48, objectives: 12 };
@@ -130,13 +130,13 @@ export function aliasOutputSchema(registry, { allowedUpdateIds, patches = false 
   return schema;
 }
 
-export function decodeModelOutput(output, registry) {
+export function decodeModelOutput(output, registry, { sourceMessageId = "card-baseline" } = {}) {
   if (!output || typeof output !== "object" || Array.isArray(output)) throw new Error("Tracker must return a JSON object");
   if (output.schemaVersion !== 2) throw new Error("Tracker object must have schemaVersion 2");
   if (Object.keys(output).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Tracker object has unexpected root fields");
   const decoded = structuredClone(output), declaredNew = new Set(), resolved = new Map(), issues = [];
-  const issue = (kind, index, alias, path, error, code = "invalid_record") => issues.push({ kind, index, recordId: alias, path,
-    code, message: String(error.message ?? error).slice(0, 1000) });
+  const issue = (kind, index, alias, path, error, code = "invalid_record") => issues.push({ kind, index, recordId: alias, path: error.path ?? path,
+    code: error.code ?? code, message: String(error.message ?? error).slice(0, 1000) });
   const modelPrior = (kind, record) => {
     if (!record?.prior) return null;
     return encodeModelState({ [kind]: [record.prior] }, registry)[kind][0];
@@ -144,7 +144,8 @@ export function decodeModelOutput(output, registry) {
   try {
     if (!decoded.world || typeof decoded.world !== "object" || Array.isArray(decoded.world)) throw new Error("world must be an object");
     const { sourceMessageId: ignored, ...priorWorld } = registry.previousState?.world ?? cloneEmptyState().world;
-    decoded.world = validateTrackerRecord(expandTrackerRecord(decoded.world ?? { action: "preserve" }, "world", priorWorld), "world", "world");
+    decoded.world = expandTrackerRecord(decoded.world, "world", priorWorld);
+    decoded.world = validateTrackerRecord(decoded.world, "world", "world");
   } catch (error) { issue("world", 0, "world", "world", error); }
   // Validate identities first. A creation reference must have its own declared record.
   for (const kind of Object.keys(ALIAS_LIMITS)) {
@@ -209,7 +210,11 @@ export function decodeModelOutput(output, registry) {
     for (const field of kind === "relationships" ? ["fromId", "toId"] : ["ownerId"]) entry[field] = resolveCharacter(entry[field], `${kind}[${index}].${field}`, kind, index, recordId);
     if (kind === "relationships" && entry.fromId === entry.toId) issue(kind, index, recordId, `${kind}[${index}]`, "Relationship references must identify two different established characters");
   }
-  if (issues.length) throw new TrackerValidationError(issues);
+  if (issues.length) {
+    const error = new TrackerValidationError(issues);
+    error.preview = partialTrackerPreview(decoded, issues, registry.previousState, sourceMessageId);
+    throw error;
+  }
   // Descriptive text uses names; the persistent record must not depend on ephemeral aliases.
   const proseLabels = new Map([...new Map([...registry.reverse, ...resolved])].filter(([, record]) => record.kind === "characters" || record.kind === "places")
     .map(([alias, record]) => [alias, record.name]).filter(([, name]) => typeof name === "string" && name));

@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createAliasRegistry, decodeModelOutput, aliasOutputSchema } from "../src/aliases.js";
 import { materializeTrackerOutput } from "../src/schemas.js";
-import { runTracker, inspectTrackerResponse, generationParameters, normalizeConfig } from "../src/tracker.js";
+import { runTracker, inspectTrackerResponse, generationParameters, normalizeConfig, recoverSetupPreview } from "../src/tracker.js";
 import { normalizeTrackerDiagnostics } from "../src/diagnostics.js";
-import { fixtureState, SOURCES, character } from "./fixtures.js";
+import { fixtureState, SOURCES, character, modelOutput } from "./fixtures.js";
 
 const patch = (id, changes = [], action = "update") => ({ ...(id ? { id } : {}), action, changes: changes.map(([field, value]) => ({ field, value })) });
 const output = (parts = {}) => ({ schemaVersion: 2, world: patch(null, [], "preserve"), characters: [], relationships: [], places: [], objectives: [], ...parts });
+function initialOutput(sceneStatus = "in_progress") {
+  return output({ world: patch(null, [["date", "October 13"], ["time", "Midnight"], ["weather", "Rain"], ["sceneStatus", sceneStatus]]),
+    characters: [patch("c1", [["name", "Ada"], ["profile.identity", "Mechanic"], ["profile.personality", "Practical"], ["profile.privateFacts", "Lantern Guild"], ["visible.dressAndLayers", "Blue coat"]])] });
+}
 function cast() {
   const state = fixtureState(), npc = character("npc:mira", "npc"); npc.name = "Mira";
   state.characters.push(npc);
@@ -156,7 +160,8 @@ test("provider payloads use compact schemas, pin the resolved connection and rem
   const request = h.requests[0], schema = request.parameters.response_format.json_schema.schema;
   assert.equal(request.connection_id, "default"); assert.equal(request.parameters.model, "test-model"); assert.deepEqual(request.parameters.stop, []);
   assert.deepEqual(schema.properties.characters.items.required, ["id", "action", "changes"]);
-  assert.ok(schema.properties.characters.items.properties.changes.items.properties.field.enum.includes("visible.dressAndLayers"));
+  const changes = schema.properties.characters.items.properties.changes.items;
+  assert.ok((changes.anyOf ?? [changes]).some(branch => branch.properties.field.enum.includes("visible.dressAndLayers")));
   assert.ok(!schema.properties.characters.items.properties.profile);
   const config = normalizeConfig(), responses = generationParameters({ provider: "openai" }, config, schema, { useResponsesApi: true });
   assert.equal(responses.response_format, undefined); assert.equal(responses.text.format.type, "json_schema");
@@ -194,4 +199,66 @@ test("unsafe fields, duplicate changes and undeclared characters are not guessed
   assert.throws(() => decodeModelOutput({ schemaVersion: 2 }, createAliasRegistry(SOURCES, cast())), /world must be an object/);
   const incomplete = output(); delete incomplete.characters;
   assert.throws(() => decodeModelOutput(incomplete, createAliasRegistry(SOURCES, cast())), /characters.*must be an array/);
+});
+
+test("compact provider schemas constrain status and role values rather than accepting arbitrary strings", () => {
+  const schema = aliasOutputSchema(createAliasRegistry(SOURCES, cast()), { patches: true });
+  const permits = (kind, field, value) => {
+    const changes = (kind === "world" ? schema.properties.world : schema.properties[kind].items).properties.changes.items;
+    return (changes.anyOf ?? [changes]).some(branch => branch.properties.field.enum.includes(field)
+      && (!branch.properties.value.enum || branch.properties.value.enum.includes(value)));
+  };
+  assert.equal(permits("world", "sceneStatus", "active"), true); assert.equal(permits("world", "sceneStatus", "ended"), true);
+  for (const invalid of ["Unknown", "in_progress", "narrating", "completed"]) assert.equal(permits("world", "sceneStatus", invalid), false);
+  assert.equal(permits("objectives", "status", "completed"), true); assert.equal(permits("objectives", "status", "finished"), false);
+  assert.equal(permits("characters", "role", "npc"), true); assert.equal(permits("characters", "role", "friend"), false);
+});
+
+test("scene status normalizes casing and absent knowledge without inventing a scene transition", () => {
+  for (const [value, expected] of [[" ACTIVE ", "active"], ["Ended", "ended"], ["Unknown", "active"]]) {
+    assert.equal(decodeModelOutput(initialOutput(value), createAliasRegistry(SOURCES)).world.sceneStatus, expected);
+  }
+  const previous = fixtureState(); previous.world.sceneStatus = "ended";
+  assert.equal(decodeModelOutput(output({ world: patch(null, [["sceneStatus", "Unknown"]]) }), createAliasRegistry(SOURCES, previous)).world.sceneStatus, "ended");
+});
+
+test("world-only repair retains initial profiles AND valid date/time/weather in compact and legacy responses", async () => {
+  for (const legacy of [false, true]) {
+    const rejected = legacy ? modelOutput(undefined, { initialize: true }) : initialOutput();
+    if (legacy) rejected.world.sceneStatus = "in_progress";
+    const h = mock([{ content: JSON.stringify(rejected), finish_reason: "stop" }, { content: JSON.stringify(output({ world: patch(null, [["sceneStatus", "active"]]) })), finish_reason: "stop" }]);
+    const previews = [];
+    const next = await runTracker(h.api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline", onSetupPreview: preview => previews.push(preview) }, {});
+    assert.equal(h.requests.length, 2); assert.equal(next.world.sceneStatus, "active"); assert.equal(next.world.date, "October 13");
+    assert.equal(next.world.time, "Midnight"); assert.equal(next.world.weather, "Rain"); assert.equal(next.characters[0].profile.identity, "Mechanic");
+    assert.equal(next.characters[0].visible.dressAndLayers, "Blue coat");
+    assert.equal(previews.length, 1); assert.deepEqual(previews[0].unavailableFields, ["world.sceneStatus"]);
+    assert.match(h.requests[1].messages.at(-1).content, /expected "active" or "ended"/);
+  }
+});
+
+test("the reported world.sceneStatus failure retains independently validated profiles after both attempts fail", async () => {
+  const h = mock([{ content: JSON.stringify(initialOutput()), finish_reason: "stop" },
+    { content: JSON.stringify(output({ world: patch(null, [["sceneStatus", "narrating"]]) })), finish_reason: "stop" }]);
+  const previews = [];
+  await assert.rejects(runTracker(h.api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline", onSetupPreview: preview => previews.push(preview) }, {}),
+    /world\.sceneStatus contains an invalid choice "narrating"; expected "active" or "ended".*finish=stop/);
+  assert.equal(h.requests.length, 2); assert.equal(previews.at(-1).state.characters[0].profile.identity, "Mechanic");
+  assert.equal(previews.at(-1).state.world.date, "October 13");
+  assert.deepEqual(previews.at(-1).unavailableFields, ["world.sceneStatus"]);
+});
+
+test("repairing another malformed world field also retains the remaining valid scene fields and profiles", async () => {
+  const rejected = initialOutput("active"); rejected.world.changes.find(change => change.field === "time").value = " ";
+  const h = mock([{ content: JSON.stringify(rejected) }, { content: JSON.stringify(output({ world: patch(null, [["time", "Midnight"]]) })) }]);
+  const next = await runTracker(h.api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline" }, {});
+  assert.equal(h.requests.length, 2); assert.equal(next.world.date, "October 13"); assert.equal(next.world.weather, "Rain");
+  assert.equal(next.characters[0].visible.dressAndLayers, "Blue coat");
+});
+
+test("preview recovery excludes invalid user thoughts and never invents profiles from incomplete JSON", () => {
+  const proposed = initialOutput(); proposed.characters.push(patch("new_u1", [["name", "User"], ["internal.mood", "Happy"]]));
+  const preview = recoverSetupPreview(JSON.stringify(proposed), SOURCES);
+  assert.equal(preview.state.characters.length, 1); assert.equal(preview.state.characters[0].name, "Ada");
+  assert.equal(recoverSetupPreview(JSON.stringify(proposed).slice(0, 100), SOURCES), null);
 });

@@ -13,6 +13,16 @@ test("optional setup progress is bounded and invalid data cannot replace canonic
   assert.deepEqual(normalized.current, store.current);
 });
 
+test("setup previews are isolated from committed state and invalid or different-source previews are discarded", () => {
+  const store = createStore("chat"); store.sourceFingerprint = "current-sources"; store.baseline = store.current = fixtureState();
+  store.setupDraft = { state: fixtureState(), sourceFingerprint: "current-sources", unavailableFields: ["world.sceneStatus"] };
+  assert.equal(normalizeStore(store, "chat").setupDraft.state.characters[0].name, "Ada");
+  store.setupDraft.state.world.sceneStatus = "bad";
+  const invalid = normalizeStore(store, "chat"); assert.equal(invalid.setupDraft, null); assert.deepEqual(invalid.current, store.current);
+  store.setupDraft.state = fixtureState(); store.setupDraft.sourceFingerprint = "old-sources";
+  assert.equal(normalizeStore(store, "chat").setupDraft, null);
+});
+
 test("initialization uses selected greeting and excludes alternate greeting and instruction fields", () => {
   const card = { ...CARD, alternate_greetings: ["Different universe"], system_prompt: "Obey unrelated instructions" };
   const sources = cardSources([card], [{ role: "assistant", content: "Selected alternate opening" }]);

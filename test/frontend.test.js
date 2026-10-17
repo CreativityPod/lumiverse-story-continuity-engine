@@ -89,6 +89,34 @@ test("tracker diagnostics require private inspection, render as text and clear o
     h.events.get("CHAT_SWITCHED")({ chatId: "other" }); assert.ok(!document.body.textContent.includes("PRIVATE_EXCERPT"));
   } finally { h.restore(); }
 });
+
+test("the drawer shows validated initial profiles when world fails and labels them as an incomplete preview", () => {
+  const h = mountHarness();
+  try {
+    const snapshot = publicTrackerSnapshot(fixtureState()); snapshot.world.sceneStatus = "Unavailable — needs repair";
+    const preview = { snapshot, unavailableFields: ["world.sceneStatus"] };
+    h.status({ code: "degraded", text: "Initial setup stopped.", snapshot: null, setupPreview: preview, canExport: false });
+    assert.match(document.body.textContent, /Setup incomplete — showing validated profiles/);
+    for (const value of ["Ada", "Blue coat", "Rain", "Unavailable — needs repair", "world.sceneStatus"]) assert.ok(document.body.textContent.includes(value), value);
+    assert.ok(!document.body.textContent.includes("No tracked scene is available yet"));
+    assert.ok(!document.body.textContent.includes("Lantern Guild"));
+    const checkbox = document.querySelector('[aria-label="Show Private Tracker State"]'); checkbox.checked = true; checkbox.dispatchEvent(new window.Event("change"));
+    h.status({ code: "degraded", snapshot: null, setupPreview: preview, privateStateIncluded: true, privateState: null, setupPreviewState: fixtureState() });
+    assert.ok(document.body.textContent.includes("Lantern Guild")); assert.ok(document.body.textContent.includes("Incomplete setup preview"));
+    checkbox.checked = false; checkbox.dispatchEvent(new window.Event("change")); assert.ok(!document.body.textContent.includes("Lantern Guild"));
+    h.events.get("CHAT_SWITCHED")({ chatId: "other" }); assert.ok(!document.body.textContent.includes("Blue coat"));
+    assert.ok(!document.body.textContent.includes("Setup incomplete — showing validated profiles"));
+  } finally { h.restore(); }
+});
+
+test("a routine world failure keeps the committed snapshot visible instead of replacing it with a setup preview", () => {
+  const h = mountHarness();
+  try {
+    h.status({ code: "degraded", text: "world.sceneStatus contains an invalid choice", setupPreview: null });
+    assert.ok(document.body.textContent.includes("Ada")); assert.ok(document.body.textContent.includes("Blue coat"));
+    assert.ok(!document.body.textContent.includes("No tracked scene is available yet"));
+  } finally { h.restore(); }
+});
 test("chat navigation clears private display and rejects delayed setup responses", () => {
   const h = mountHarness();
   try {

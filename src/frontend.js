@@ -151,7 +151,8 @@ export function setup(ctx) {
   if (native) { badge = ctx.components.mountBadge(badgeSlot, { text: "Checking", color: "neutral", size: "pill" }); mounts.push(badge); }
   else { const text = element("span", "sce-hint", "Checking"); badgeSlot.append(text); badge = { update: props => { text.textContent = props.text; } }; }
 
-  const snapshotSection = section("Continuity snapshot"), snapshotContent = element("div", "sce-field"); snapshotSection.append(snapshotContent);
+  const snapshotSection = section("Continuity snapshot"), snapshotContent = element("div", "sce-field"), previewNotice = element("div", "sce-hint");
+  previewNotice.hidden = true; snapshotSection.append(previewNotice, snapshotContent);
   const actionSection = section("Actions"), actions = element("div", "sce-actions"), feedback = element("div", "sce-hint"); feedback.setAttribute("aria-live", "polite"); actionSection.append(actions, feedback);
   const privateDetails = element("details", "sce-details"), privateBody = element("div", "sce-details-body"), privateText = element("pre", "sce-json", "Private state is hidden.");
   const diagnosticDetails = element("details", "sce-details"), diagnosticText = element("pre", "sce-json");
@@ -343,11 +344,14 @@ export function setup(ctx) {
     if (!dirty) { enabled.set(status.config.enabled); widgetPreference.set(status.config.showStatusWidget); output.set(status.config.outputMode); tokens.set(status.config.maxTokens); timeout.set(status.config.timeoutMs / 1000); connection.options(connectionOptions); connection.set(status.config.connectionId); }
     cardNotice.hidden = !status.cardChanged;
     cardNotice.textContent = "The card changed. Use Refresh Card Profiles to rebuild continuity from the edited card and selected history.";
-    renderSnapshot(status.snapshot); renderSetupChoices(); updateButtons(); updateWidget(status);
+    previewNotice.hidden = Boolean(status.snapshot || !status.setupPreview);
+    previewNotice.textContent = previewNotice.hidden ? "" : `Setup incomplete — showing validated profiles and available scene details. ${status.setupPreview.unavailableFields?.length ? `Needs repair: ${status.setupPreview.unavailableFields.join(", ")}. ` : ""}These results are a preview until setup completes.`;
+    renderSnapshot(status.snapshot ?? status.setupPreview?.snapshot); renderSetupChoices(); updateButtons(); updateWidget(status);
     const diagnosticKey = `${info?.lastAttemptAt ?? 0}:${info?.outcome ?? ""}`;
     if (!showPrivate) { privateText.textContent = "Private state is hidden."; diagnosticText.textContent = ""; diagnosticDetails.hidden = true; }
     else if (status.privateStateIncluded) {
-      privateText.textContent = status.privateState ? JSON.stringify(status.privateState, null, 2) : "No private state available."; lastPrivateRevision = status.revision;
+      privateText.textContent = status.privateState ? JSON.stringify(status.privateState, null, 2)
+        : status.setupPreviewState ? JSON.stringify({ status: "Incomplete setup preview", unavailableFields: status.setupPreview?.unavailableFields ?? [], state: status.setupPreviewState }, null, 2) : "No private state available."; lastPrivateRevision = status.revision;
       diagnosticDetails.hidden = false; diagnosticText.textContent = JSON.stringify({ lastAttempt: status.trackerDiagnostics ?? null, totals: status.trackerMetrics ?? null }, null, 2); privateDiagnosticKey = diagnosticKey;
     } else if ((lastPrivateRevision !== status.revision || privateDiagnosticKey !== diagnosticKey) && !status.processing) { privateText.textContent = "Loading current private state…"; requestStatus(); }
   }
@@ -384,7 +388,7 @@ export function setup(ctx) {
     statusText.textContent = chatId ? "Loading chat continuity…" : "Open a character chat to begin.";
     setupFeedback.textContent = "Save the original starting state and private profiles as a reusable JSON file.";
     setupFeedback.hidden = false;
-    renderSnapshot(null); destroyWidget();
+    previewNotice.hidden = true; previewNotice.textContent = ""; renderSnapshot(null); destroyWidget();
     if (chatId && widgetConfig) updateWidget({ chatId, config: widgetConfig, code: "loading", text: "Loading chat continuity…" });
     updateButtons(); requestStatus();
   }

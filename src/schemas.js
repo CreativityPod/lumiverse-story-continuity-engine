@@ -59,30 +59,52 @@ export function cloneEmptyState() {
 }
 
 function validateNode(value, schema, path) {
+  const invalid = (message, code = "invalid_value") => Object.assign(new Error(message), { path, code });
   if (schema.type === "object") {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path} must be an object`);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid(`${path} must be an object`, "invalid_type");
     const expected = Object.keys(schema.properties);
-    if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) throw new Error(`${path} has missing or unexpected fields`);
+    if (Object.keys(value).length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) throw invalid(`${path} has missing or unexpected fields`, "invalid_fields");
     return Object.fromEntries(expected.map(key => [key, validateNode(value[key], schema.properties[key], `${path}.${key}`)]));
   }
   if (schema.type === "array") {
-    if (!Array.isArray(value) || value.length > schema.maxItems) throw new Error(`${path} exceeds its list limit or is not an array`);
+    if (!Array.isArray(value) || value.length > schema.maxItems) throw invalid(`${path} exceeds its list limit or is not an array`, "invalid_array");
     return value.map((entry, index) => validateNode(entry, schema.items, `${path}[${index}]`));
   }
   if (schema.type === "integer") {
-    if (!Number.isInteger(value) || !schema.enum.includes(value)) throw new Error(`${path} has an unsupported version`);
+    if (!Number.isInteger(value) || !schema.enum.includes(value)) throw invalid(`${path} has an unsupported version`, "invalid_version");
     return value;
   }
-  if (typeof value !== "string") throw new Error(`${path} must be text`);
+  if (typeof value !== "string") throw invalid(`${path} must be text`, "invalid_type");
   const clean = value.replace(/\r\n?/g, "\n").trim();
   const limit = /\.(id|fromId|toId|ownerId|sourceMessageId)$/.test(path) ? 180 : /\.name$/.test(path) ? 160 : 1600;
-  if (!clean || clean.length > limit || /<!--|-->|<\/?story_continuity/i.test(clean)) throw new Error(`${path} contains invalid text`);
-  if (schema.enum && !schema.enum.includes(clean)) throw new Error(`${path} contains an invalid choice`);
+  if (!clean || clean.length > limit || /<!--|-->|<\/?story_continuity/i.test(clean)) throw invalid(`${path} contains invalid text`, "invalid_text");
+  if (schema.enum && !schema.enum.includes(clean)) throw Object.assign(new Error(`${path} contains an invalid choice ${JSON.stringify(clean)}; expected ${schema.enum.map(choice => JSON.stringify(choice)).join(" or ")}`),
+    { path, code: "invalid_choice", allowedValues: schema.enum });
   return clean;
 }
 
 export function validateTrackerRecord(value, kind, path) {
   return validateNode(value, kind === "world" ? TRACKER_OUTPUT_JSON_SCHEMA.properties.world : TRACKER_OUTPUT_JSON_SCHEMA.properties[kind].items, path);
+}
+
+// A display-only candidate assembled from independently validated records and
+// fields. It never becomes a checkpoint, baseline, export or injected context.
+export function partialTrackerPreview(decoded, issues, previousState, sourceMessageId) {
+  const previous = previousState ?? cloneEmptyState(), unavailableFields = [], root = { schemaVersion: 2, world: { action: "update" } };
+  for (const [key, schema] of Object.entries(worldProperties)) {
+    if (key === "action") continue;
+    try { root.world[key] = validateNode(decoded.world?.[key], schema, `world.${key}`); }
+    catch { root.world[key] = previous.world[key]; unavailableFields.push(`world.${key}`); }
+  }
+  for (const kind of ["characters", "relationships", "places", "objectives"]) root[kind] = (Array.isArray(decoded[kind]) ? decoded[kind] : [])
+    .filter((entry, index) => !issues.some(issue => issue.kind === kind && issue.index === index || issue.kind === kind && issue.index === -1));
+  const characters = new Set([...previous.characters, ...root.characters].map(entry => entry.id));
+  root.relationships = root.relationships.filter(entry => characters.has(entry.fromId) && characters.has(entry.toId) && entry.fromId !== entry.toId);
+  root.objectives = root.objectives.filter(entry => characters.has(entry.ownerId));
+  try {
+    const state = materializeTrackerOutput(root, previousState, sourceMessageId);
+    return { state, unavailableFields };
+  } catch { return null; }
 }
 
 function checkReferences(state, allowedSources) {

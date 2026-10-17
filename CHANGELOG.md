@@ -1,3 +1,12 @@
+# 1.5.4
+
+- Fix the v1.5.3 compact-schema regression that constrained change-field names but lost enum constraints on their values. Scene/objective statuses and character roles/controllers now have field-specific value choices. Instructions and errors identify valid status values; casing and an unknown scene-status claim normalize conservatively.
+- Field-specific repair preserves unaffected changes in the same record, including initial clock/weather while correcting scene status. Compact and legacy full responses share this behavior.
+- A world/section failure during initialization no longer leaves an empty drawer when validated profiles are available. A persistent, explicitly incomplete preview shows validated profiles, places and available scene fields; failed world fields are marked unavailable.
+- Preview data never becomes a checkpoint, injected story context, variable mirror or exported setup. Private profile facts remain opt-in, source changes invalidate previews, and successful setup retires them.
+- Complete cached failed-response excerpts can restore an older setup preview without new model calls. Truncated evidence cannot recreate missing facts; Retry Setup remains explicit.
+- Add regressions for the reported scene-status failure, field-only repair, enum constraints/normalization, private profile inspection, restart/reopen recovery, preview isolation, routine-failure visibility and successful retry cleanup.
+
 # 1.5.3
 
 - Tracker responses use compact field changes; unchanged facts inherit locally and new character declarations can omit unsupported profiles. Existing saves, setup exports, canonical schema and legacy full-response handling remain compatible.

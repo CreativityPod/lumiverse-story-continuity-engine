@@ -73,6 +73,45 @@ test("failed response evidence stays private, persists across restart, and expos
   assert.equal(recovered.trackerMetrics.firstPass, 2);
 });
 
+test("initial world failure displays validated profiles across restart without committing or exposing private facts", async () => {
+  const h = harness(), response = modelOutput(undefined, { initialize: true }); response.world.sceneStatus = "in_progress";
+  h.setResponse(async () => ({ content: JSON.stringify(response), finish_reason: "stop" }));
+  await h.select(); assert.equal(h.requests.length, 2);
+  const saved = await h.engine.loadStore("chat");
+  assert.equal(saved.baseline, null); assert.equal(saved.current, null); assert.equal(saved.initialSetup, null);
+  assert.equal(saved.setupDraft.state.characters[0].profile.identity, "Mechanic");
+  const status = await h.engine.status("chat", "owner");
+  assert.equal(status.snapshot, null); assert.equal(status.setupPreview.snapshot.characters[0].visible.dressAndLayers, "Blue coat");
+  assert.equal(status.setupPreview.snapshot.world.weather, "Rain");
+  assert.equal(status.setupPreview.snapshot.world.sceneStatus, "Unavailable — needs repair");
+  assert.equal(status.canExport, false); assert.ok(!JSON.stringify(status).includes("Lantern Guild"));
+  assert.ok(![...h.variables.values()].join(" ").includes("Blue coat"));
+  const prompt = await h.engine.intercept([{ role: "user", content: "Continue" }], { chatId: "chat", userId: "owner" });
+  assert.ok(!JSON.stringify(prompt).includes("Blue coat")); assert.equal(h.requests.length, 2);
+  const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 2);
+  const privateStatus = await restarted.status("chat", "owner", true);
+  assert.equal(privateStatus.setupPreviewState.characters[0].profile.identity, "Mechanic");
+  assert.equal(privateStatus.setupPreviewState.world.sceneStatus, "Unavailable — needs repair");
+  h.setResponse(null); await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
+  await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "retry-preview" }, "owner");
+  const complete = await restarted.status("chat", "owner", true);
+  assert.equal(complete.code, "active"); assert.equal(complete.setupPreview, null); assert.equal(complete.setupPreviewState, null);
+  assert.equal((await restarted.loadStore("chat")).setupDraft, null);
+});
+
+test("v1.5.3 failed setup evidence can restore a preview locally without running generation", async () => {
+  const h = harness(), response = modelOutput(undefined, { initialize: true }); response.world.sceneStatus = "in_progress";
+  h.setResponse(async () => ({ content: JSON.stringify(response), finish_reason: "stop" })); await h.select();
+  const path = [...h.files.keys()].find(key => key.startsWith("chats/"));
+  h.files.get(path).setupDraft = null;
+  const restarted = createStoryEngine(h.api), status = await restarted.status("chat", "owner");
+  assert.equal(h.requests.length, 2); assert.equal(status.setupPreview.snapshot.characters[0].name, "Ada");
+  assert.equal(status.setupPreview.snapshot.world.sceneStatus, "Unavailable — needs repair");
+  h.files.get(path).trackerDiagnostics.attempts.forEach(attempt => { attempt.excerpt = '{"schemaVersion":2,"world":'; });
+  assert.equal((await restarted.status("chat", "owner")).setupPreview, null);
+});
+
 test("upgrading the tracker contract releases an old rejection pause without replaying valid checkpoints", async () => {
   const h = harness(); await h.select(); h.addTurn("Ada nods."); h.setResponse(async () => ({ content: "invalid" }));
   await h.engine.schedule("chat", {}, "owner");

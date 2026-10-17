@@ -2,7 +2,7 @@ import { validateState, publicTrackerSnapshot, remapStateSources, legacyTrackerS
 import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
-import { DEFAULT_CONFIG, normalizeConfig, runTracker } from "./tracker.js";
+import { DEFAULT_CONFIG, normalizeConfig, runTracker, recoverSetupPreview } from "./tracker.js";
 import { TRACKER_CONTRACT_VERSION } from "./protocol.js";
 
 export function createStoryEngine(api) {
@@ -13,12 +13,32 @@ export function createStoryEngine(api) {
   const pathFor = chatId => `chats/${safeToken(chatId)}.json`;
   const has = permission => api.permissions.has(permission);
   const loadConfig = async () => normalizeConfig(await api.storage.getJson("config.json", { fallback: DEFAULT_CONFIG }));
-  const loadStore = async chatId => normalizeStore(await api.storage.getJson(pathFor(chatId), { fallback: createStore(chatId) }), chatId);
+  const loadStore = async chatId => {
+    const store = normalizeStore(await api.storage.getJson(pathFor(chatId), { fallback: createStore(chatId) }), chatId);
+    // Older failed setups may still have a complete rejected response in their
+    // bounded diagnostics. Recover only independently validated preview data.
+    if (!store.baseline && !store.setupDraft && store.sources && store.initializationMode === "create"
+      && store.trackerDiagnostics?.outcome === "failed" && store.trackerDiagnostics.sourceMessageId === "card-baseline") {
+      for (const attempt of [...store.trackerDiagnostics.attempts].reverse()) {
+        const preview = recoverSetupPreview(attempt.excerpt, store.sources);
+        if (preview) { store.setupDraft = { ...preview, sourceFingerprint: store.sourceFingerprint, capturedAt: store.trackerDiagnostics.startedAt }; break; }
+      }
+    }
+    return store;
+  };
   const saveStore = async store => { if (!deleted.has(store.chatId)) await api.storage.setJson(pathFor(store.chatId), store, { indent: 2 }); };
   const send = (payload, userId) => api.sendToFrontend(payload, userId);
   const required = ["generation", "interceptor", "chat_mutation", "characters", "chats"];
   const rejectionRetryHint = " Automatic retries are paused for this turn. Use Reprocess Latest Turn to retry.";
   const interruptedSetupError = "Initial setup was interrupted. Inspect the last stage, then select Retry Setup to start again.";
+  const previewForDrawer = (draft, includePrivate = false) => {
+    const snapshot = includePrivate ? structuredClone(draft.state) : publicTrackerSnapshot(draft.state);
+    for (const path of draft.unavailableFields) {
+      const [kind, field, extra] = path.split(".");
+      if (kind === "world" && !extra && Object.hasOwn(snapshot.world, field)) snapshot.world[field] = "Unavailable — needs repair";
+    }
+    return snapshot;
+  };
   const selection = userId => selected.get(userKey(userId));
   function adopt(chatId, userId) { const id = typeof chatId === "string" && chatId ? chatId : null; selected.set(userKey(userId), id); if (id) users.set(id, userId); return id; }
   function requestChat(payload, userId) {
@@ -77,6 +97,9 @@ export function createStoryEngine(api) {
     const payload = { type: "story_status", chatId, config, code, text, processing: Boolean(busy), level: code === "active" ? "green" : "amber",
       revision: store?.revision ?? 0, lastRevisionAt: store?.lastRevisionAt ?? "", cardChanged: Boolean(store?.pendingCardFingerprint),
       snapshot: store && !store.blocked ? publicTrackerSnapshot(store.current) : null, canExport: Boolean(store?.initialSetup),
+      setupPreview: !store?.blocked && !store?.current && store?.setupDraft ? {
+        snapshot: previewForDrawer(store.setupDraft), unavailableFields: store.setupDraft.unavailableFields, capturedAt: store.setupDraft.capturedAt,
+      } : null,
       canBegin: Boolean(store?.canBegin && !busy && !generating.has(chatId)),
       canImport: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && store?.importable && !store?.blocked),
       canCreate: Boolean(chatId && config.enabled && !missing.length && !busy && !generating.has(chatId) && (store?.sources || setupProgress?.status === "failed") && (!store.baseline || setupProgress?.status === "failed") && !store.blocked && !store.epoch.startsWith("import:")),
@@ -87,7 +110,10 @@ export function createStoryEngine(api) {
         lastTrackedMessageId: store?.lastTrackedMessageId ?? "", pendingMessageId: store?.rejectedTurn?.messageId || (store?.lastError ? store?.trackerDiagnostics?.sourceMessageId : "") || "", retryPaused: Boolean(store?.rejectedTurn),
         outcome: store?.trackerDiagnostics?.outcome ?? "", lastAttemptAt: store?.trackerDiagnostics?.startedAt ?? 0 },
       privateStateIncluded: includePrivate };
-    if (includePrivate && store && !store.blocked) { payload.privateState = store.current; payload.trackerDiagnostics = store.trackerDiagnostics; payload.trackerMetrics = store.trackerMetrics; }
+    if (includePrivate && store && !store.blocked) {
+      payload.privateState = store.current; payload.setupPreviewState = !store.current && store.setupDraft ? previewForDrawer(store.setupDraft, true) : null;
+      payload.trackerDiagnostics = store.trackerDiagnostics; payload.trackerMetrics = store.trackerMetrics;
+    }
     return payload;
   }
   async function publish(chatId, userId, includePrivate = false) {
@@ -252,13 +278,17 @@ export function createStoryEngine(api) {
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, fillMissingSceneDetails: store.fillMissingSceneDetails,
-          sourceMessageId: "card-baseline", remainingMs: remaining(), onDiagnostic: captureDiagnostics, onProgress: progress => setupStage(store, progress.stage, userId, progress) }, config, userId);
+          sourceMessageId: "card-baseline", remainingMs: remaining(), onDiagnostic: captureDiagnostics,
+          onSetupPreview: async preview => {
+            store.setupDraft = { ...preview, sourceFingerprint: store.sourceFingerprint, capturedAt: Date.now() };
+            await saveStore(store); await publish(chatId, userId, options.includePrivate);
+          }, onProgress: progress => setupStage(store, progress.stage, userId, progress) }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
         const freshMessages = await api.chat.getMessages(chatId);
         const fresh = await getSources(chatId, freshMessages, userId);
         if (fingerprint(fresh.sources) !== currentFingerprint || deleted.has(chatId)) throw new Error("Card or opening changed during initialization; retry on the selected state.");
         await setupStage(store, "saving", userId);
-        store.baseline = baseline; store.current = baseline; store.setupTargetMessageId = null; commitRevision(store);
+        store.baseline = baseline; store.current = baseline; store.setupDraft = null; store.setupTargetMessageId = null; commitRevision(store);
         await saveStore(store); await mirror(store);
         await setupStage(store, "ready", userId);
       }

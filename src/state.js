@@ -105,7 +105,7 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
     initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
+    setupDraft: null, trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
     lastTrackedMessageId: "", initializationMode: "", fillMissingSceneDetails: false, setupProgress: null, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
@@ -116,6 +116,16 @@ export function normalizeStore(value, chatId) {
   next.trackerDiagnostics = normalizeTrackerDiagnostics(value.trackerDiagnostics);
   next.trackerMetrics = Object.fromEntries(Object.keys(empty.trackerMetrics).map(key => [key, Number.isFinite(value.trackerMetrics?.[key]) && value.trackerMetrics[key] >= 0 ? value.trackerMetrics[key] : 0]));
   next.lastTrackedMessageId = typeof value.lastTrackedMessageId === "string" ? value.lastTrackedMessageId.slice(0, 180) : "";
+  next.setupDraft = null;
+  if (value.setupDraft?.sourceFingerprint === next.sourceFingerprint) {
+    try {
+      const state = validateState(value.setupDraft.state, { allowedSourceMessageIds: ["card-baseline"] });
+      if (state.characters.length) next.setupDraft = { state, sourceFingerprint: next.sourceFingerprint,
+        capturedAt: Number.isFinite(value.setupDraft.capturedAt) ? value.setupDraft.capturedAt : 0,
+        unavailableFields: (Array.isArray(value.setupDraft.unavailableFields) ? value.setupDraft.unavailableFields : [])
+          .filter(path => typeof path === "string" && path.length < 180).slice(0, 64) };
+    } catch { /* An invalid preview never discards valid committed state. */ }
+  }
   next.fillMissingSceneDetails = value.fillMissingSceneDetails === true;
   const progress = value.setupProgress;
   next.setupProgress = progress && ["setup", "reading", "generating", "validating", "repairing", "saving", "ready"].includes(progress.stage)
