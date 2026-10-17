@@ -3,6 +3,7 @@ import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializat
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
 import { DEFAULT_CONFIG, normalizeConfig, runTracker } from "./tracker.js";
+import { TRACKER_CONTRACT_VERSION } from "./protocol.js";
 
 export function createStoryEngine(api) {
   const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map();
@@ -82,8 +83,11 @@ export function createStoryEngine(api) {
       awaitingSetup: Boolean(store?.awaitingSetup), setupTargetMessageId: store?.setupTargetMessageId ?? null,
       fillMissingSceneDetails: store?.fillMissingSceneDetails === true,
       setupProgress: setupProgress ?? null,
+      trackerInfo: { outputMode: store?.trackerDiagnostics?.outputMode ?? config.outputMode, provider: store?.trackerDiagnostics?.provider ?? "", model: store?.trackerDiagnostics?.model ?? "",
+        lastTrackedMessageId: store?.lastTrackedMessageId ?? "", pendingMessageId: store?.rejectedTurn?.messageId || (store?.lastError ? store?.trackerDiagnostics?.sourceMessageId : "") || "", retryPaused: Boolean(store?.rejectedTurn),
+        outcome: store?.trackerDiagnostics?.outcome ?? "", lastAttemptAt: store?.trackerDiagnostics?.startedAt ?? 0 },
       privateStateIncluded: includePrivate };
-    if (includePrivate && store && !store.blocked) payload.privateState = store.current;
+    if (includePrivate && store && !store.blocked) { payload.privateState = store.current; payload.trackerDiagnostics = store.trackerDiagnostics; payload.trackerMetrics = store.trackerMetrics; }
     return payload;
   }
   async function publish(chatId, userId, includePrivate = false) {
@@ -137,6 +141,15 @@ export function createStoryEngine(api) {
     const config = await loadConfig();
     if (!config.enabled || required.some(permission => !has(permission))) return publish(chatId, userId, options.includePrivate);
     let store = await loadStore(chatId);
+    const captureDiagnostics = async diagnostics => {
+      store.trackerDiagnostics = diagnostics;
+      const metric = { first_pass: "firstPass", repaired: "repaired", failed: "failed" }[diagnostics.outcome];
+      if (metric) {
+        store.trackerMetrics[metric]++;
+        store.trackerMetrics.elapsedMs += diagnostics.elapsedMs;
+        store.trackerMetrics.completionTokens += diagnostics.attempts.reduce((sum, attempt) => sum + attempt.usage.completionTokens, 0);
+      }
+    };
     processing.add(chatId);
     const deadline = Date.now() + 240000;
     let initializationNotice = null, trackerAttempt = null, setupRun = false;
@@ -196,7 +209,7 @@ export function createStoryEngine(api) {
       }
       if (options.refreshCards && context.anchor) {
         const refreshed = await runTracker(api, { initialize: true, refreshProfiles: true, sources: store.sources,
-          previousState: store.baseline, sourceMessageId: context.anchor.id, remainingMs: Math.max(1000, deadline - Date.now()) }, config, userId);
+          previousState: store.baseline, sourceMessageId: context.anchor.id, remainingMs: Math.max(1000, deadline - Date.now()), onDiagnostic: captureDiagnostics }, config, userId);
         if (!(await matches(chatId, messages, context.anchor.index))) throw new Error("The imported setup changed during profile refresh.");
         const enriched = structuredClone(store.baseline);
         for (const char of enriched.characters) {
@@ -230,6 +243,7 @@ export function createStoryEngine(api) {
         prefix = validCheckpointPrefix(store, turns);
       }
       store.current = prefix.previousState;
+      store.lastTrackedMessageId = prefix.count ? String(turns[prefix.count - 1].assistant.id) : store.baseline ? context.anchor?.id ?? "card-baseline" : "";
       store.checkpoints = prefix.checkpoints;
       store.lastError = "";
       if (setupRun && store.baseline) await setupStage(store, "saving", userId);
@@ -238,7 +252,7 @@ export function createStoryEngine(api) {
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, fillMissingSceneDetails: store.fillMissingSceneDetails,
-          sourceMessageId: "card-baseline", remainingMs: remaining(), onProgress: progress => setupStage(store, progress.stage, userId, progress) }, config, userId);
+          sourceMessageId: "card-baseline", remainingMs: remaining(), onDiagnostic: captureDiagnostics, onProgress: progress => setupStage(store, progress.stage, userId, progress) }, config, userId);
         // Initialization must still refer to the same cards and selected opening.
         const freshMessages = await api.chat.getMessages(chatId);
         const fresh = await getSources(chatId, freshMessages, userId);
@@ -254,7 +268,7 @@ export function createStoryEngine(api) {
         const isOpening = !context.anchor && index === 0 && !turn.user && contentToText(turn.assistant.content) === store.sources.selectedOpening;
         // After generation and repair both fail, do not repeat an unchanged request
         // on every background event. Keep the proven prefix across worker restarts.
-        const signature = isOpening ? null : fingerprint({ contract: 1, userId, epoch: store.epoch, sources: store.sourceFingerprint,
+        const signature = isOpening ? null : fingerprint({ contract: TRACKER_CONTRACT_VERSION, userId, epoch: store.epoch, sources: store.sourceFingerprint,
           previousState, turn: turn.fingerprint, focusCharacterId: turn.assistant.character_id,
           connectionId: config.connectionId, outputMode: config.outputMode, maxTokens: config.maxTokens, timeoutMs: config.timeoutMs });
         if (signature && store.rejectedTurn?.signature === signature && !options.reprocess && !options.refreshCards) {
@@ -265,11 +279,11 @@ export function createStoryEngine(api) {
         store.rejectedTurn = null; trackerAttempt = signature;
         const state = isOpening ? previousState : await runTracker(api, { sources: store.sources, previousState, focusCharacterId: turn.assistant.character_id,
           userText: contentToText(turn.user?.content), assistantText: contentToText(turn.assistant.content),
-          sourceMessageId: String(turn.assistant.id), isOpening, remainingMs: remaining() }, config, userId);
+          sourceMessageId: String(turn.assistant.id), isOpening, remainingMs: remaining(), onDiagnostic: captureDiagnostics }, config, userId);
         trackerAttempt = null;
         if (!(await matches(chatId, messages, turn.index))) throw new Error("The selected branch changed during tracking; stale output was discarded.");
         store.checkpoints[turn.key] = { fingerprint: turn.fingerprint, state, createdAt: new Date().toISOString() };
-        store.current = state; previousState = state; commitRevision(store);
+        store.current = state; previousState = state; store.lastTrackedMessageId = String(turn.assistant.id); commitRevision(store);
         if (!context.anchor && index === 0 && (!store.initialSetup || store.initialSetup.fingerprint !== turn.fingerprint)) store.initialSetup = { key: turn.key, fingerprint: turn.fingerprint, state: structuredClone(state) };
         await saveStore(store); await mirror(store);
       }
@@ -280,7 +294,7 @@ export function createStoryEngine(api) {
       store.lastError = String(error?.message ?? error).slice(0, 600);
       if (setupRun && store.setupProgress?.status === "running") await setupStage(store, store.setupProgress.stage, userId, { error: store.lastError });
       if (trackerAttempt && error?.code === "TRACKER_STATE_REJECTED") {
-        store.rejectedTurn = { signature: trackerAttempt, error: store.lastError.slice(0, 450) };
+        store.rejectedTurn = { signature: trackerAttempt, error: store.lastError.slice(0, 450), messageId: store.trackerDiagnostics?.sourceMessageId ?? "" };
         store.lastError = store.rejectedTurn.error + rejectionRetryHint;
       }
       await saveStore(store);

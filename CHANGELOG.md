@@ -1,3 +1,14 @@
+# 1.5.3
+
+- Tracker responses use compact field changes; unchanged facts inherit locally and new character declarations can omit unsupported profiles. Existing saves, setup exports, canonical schema and legacy full-response handling remain compatible.
+- Preserved records restore their saved values before replacement fields are validated. Identity/controller checks remain enforced.
+- Reference validation reports all offending aliases, indexed fields and missing declarations together. Targeted repair retains validated records and requires explicit replacements for rejected records; incomplete repairs cannot silently drop relationships.
+- Repair preserves actual rejected text/tool arguments. Empty, malformed, wrong-type, reasoning-only, truncated, refused, missing-tool and transport responses receive distinct diagnostics; one shared deadline still covers generation and its single repair.
+- Quiet requests clear narrative stop sequences, pin resolved connections, expose effective output mode, and support the selected OpenAI Responses preset format and an explicit Google mode.
+- Bounded private response excerpts, attempt metadata and success/repair/failure totals persist outside canonical state. The drawer identifies pending and last tracked turns, explains saved rejection pauses, and clears private evidence on hide/navigation.
+- Old contract rejection pauses can retry with the improved protocol without replaying successful checkpoints. Transient provider failures retain their automatic retry behavior; failed initialization retains explicit Retry Setup.
+- Added recovery, dependency, atomicity, privacy, protocol-upgrade and provider-payload regressions plus an opt-in local Lumiverse provider smoke suite.
+
 # 1.5.2
 
 - Initial setup reports reading cards/lore, generating, validating, repairing when needed, saving, and readiness in the chat controls and drawer, with locally updated elapsed time.

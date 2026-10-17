@@ -13,7 +13,7 @@ const STORY_WIDGET_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="32" he
   <path d="m14 25 10 3m-10 5 10 3m-10 5 7 2" stroke="#9071d8" stroke-width="2.8" stroke-linecap="round"/>
   <path d="m40 39 10-3m-10 10 10-3" stroke="#31a9d3" stroke-width="2.8" stroke-linecap="round"/>
 </svg>`;
-const OUTPUT_OPTIONS = [{ value: "auto", label: "Auto" }, { value: "openai", label: "OpenAI-compatible JSON Schema" }, { value: "anthropic", label: "Anthropic Tool" }, { value: "plain", label: "Plain JSON" }];
+const OUTPUT_OPTIONS = [{ value: "auto", label: "Auto" }, { value: "openai", label: "OpenAI-compatible JSON Schema" }, { value: "openai-responses", label: "OpenAI Responses JSON Schema" }, { value: "anthropic", label: "Anthropic Tool" }, { value: "google", label: "Google JSON Schema" }, { value: "plain", label: "Plain JSON (prompt only)" }];
 const SETUP_STAGE_TEXT = { setup: "Preparing setup", reading: "Reading character cards and lore", generating: "Generating profiles and starting state",
   validating: "Validating the response", repairing: "Repairing rejected output", saving: "Saving the initial setup", ready: "Initial setup ready" };
 
@@ -142,6 +142,7 @@ export function setup(ctx) {
   });
   const connection = control("select", settings, "Tracker connection", "", { options: connectionOptions });
   const connectionHint = element("div", "sce-hint"); settings.append(connectionHint);
+  const effectiveMode = element("div", "sce-hint"), trackingHint = element("div", "sce-hint"); settings.append(effectiveMode, trackingHint);
   const output = control("select", advancedBody, "Structured output mode", "auto", { options: OUTPUT_OPTIONS });
   const tokens = control("number", advancedBody, "Maximum tracker output tokens", 6144, { min: 400, max: 16384, step: 100, integer: true });
   const timeout = control("number", advancedBody, "Tracker timeout in seconds", 120, { min: 5, max: 300, step: 5, integer: true });
@@ -153,10 +154,15 @@ export function setup(ctx) {
   const snapshotSection = section("Continuity snapshot"), snapshotContent = element("div", "sce-field"); snapshotSection.append(snapshotContent);
   const actionSection = section("Actions"), actions = element("div", "sce-actions"), feedback = element("div", "sce-hint"); feedback.setAttribute("aria-live", "polite"); actionSection.append(actions, feedback);
   const privateDetails = element("details", "sce-details"), privateBody = element("div", "sce-details-body"), privateText = element("pre", "sce-json", "Private state is hidden.");
+  const diagnosticDetails = element("details", "sce-details"), diagnosticText = element("pre", "sce-json");
+  let privateDiagnosticKey = "";
+  diagnosticDetails.append(element("summary", "", "Tracker diagnostics and response excerpt"), diagnosticText); diagnosticDetails.hidden = true;
   privateDetails.append(element("summary", "", "Private tracker state"), privateBody); panel.append(privateDetails);
   control("checkbox", privateBody, "Show Private Tracker State", false, { label: "Show private tracker state" }, value => {
-    showPrivate = Boolean(value); lastPrivateRevision = -1; privateText.textContent = showPrivate ? "Loading private state…" : "Private state is hidden."; requestStatus();
-  }); privateBody.append(privateText);
+    showPrivate = Boolean(value); lastPrivateRevision = -1; privateDiagnosticKey = "";
+    diagnosticText.textContent = ""; diagnosticDetails.hidden = !showPrivate;
+    privateText.textContent = showPrivate ? "Loading private state…" : "Private state is hidden."; requestStatus();
+  }); privateBody.append(privateText, diagnosticDetails);
   const button = (root, text, action, primary = false) => { const btn = element("button", `sce-button${primary ? " sce-primary" : ""}`, text); btn.type = "button"; btn.addEventListener("click", action); root.append(btn); return btn; };
   button(actions, "Save Settings", () => { dirty = false; send({ type: "story_save_config", config: { enabled: enabled.get(), showStatusWidget: widgetPreference.get(), connectionId: connection.get(), outputMode: output.get(), maxTokens: tokens.get(), timeoutMs: Number(timeout.get()) * 1000 } }); }, true);
   button(actions, "Refresh Connections", () => send({ type: "story_get_connections" }));
@@ -326,6 +332,11 @@ export function setup(ctx) {
     if (!sceneChoiceDirty) fillMissingSceneDetails = status.fillMissingSceneDetails === true;
     widgetConfig = { ...status.config };
     statusText.textContent = status.text;
+    const info = status.trackerInfo;
+    effectiveMode.textContent = info ? `Effective output: ${info.outputMode}${info.outputMode === "plain" ? " (prompt-only JSON; select a structured mode if supported)" : ""}${info.provider ? ` · ${info.provider}` : ""}${info.model ? ` · ${info.model}` : ""}` : "";
+    trackingHint.textContent = info?.retryPaused ? `Showing the saved failure for message ${info.pendingMessageId || "awaiting retry"}. Automatic retries are paused; later turns remain pending. Last tracked: ${info.lastTrackedMessageId || "none"}.`
+      : info?.pendingMessageId ? `Tracking is pending for message ${info.pendingMessageId}. Last tracked: ${info.lastTrackedMessageId || "none"}.`
+      : info?.lastTrackedMessageId ? `Last tracked message: ${info.lastTrackedMessageId}.` : "";
     revisionText.textContent = `Revision ${status.revision}${status.lastRevisionAt ? ` · Last revised ${new Date(status.lastRevisionAt).toLocaleString()}` : ""}`;
     badge.update({ text: status.processing ? "Updating" : status.code === "active" ? "Ready" : status.code === "setup" ? "Choose setup" : status.code === "idle" ? "Idle" : "Attention", color: status.level === "green" ? "success" : "warning" });
     tab.setBadge(status.level === "green" || status.code === "idle" ? null : "!");
@@ -333,9 +344,12 @@ export function setup(ctx) {
     cardNotice.hidden = !status.cardChanged;
     cardNotice.textContent = "The card changed. Use Refresh Card Profiles to rebuild continuity from the edited card and selected history.";
     renderSnapshot(status.snapshot); renderSetupChoices(); updateButtons(); updateWidget(status);
-    if (!showPrivate) privateText.textContent = "Private state is hidden.";
-    else if (status.privateStateIncluded) { privateText.textContent = status.privateState ? JSON.stringify(status.privateState, null, 2) : "No private state available."; lastPrivateRevision = status.revision; }
-    else if (lastPrivateRevision !== status.revision && !status.processing) { privateText.textContent = "Loading current private state…"; requestStatus(); }
+    const diagnosticKey = `${info?.lastAttemptAt ?? 0}:${info?.outcome ?? ""}`;
+    if (!showPrivate) { privateText.textContent = "Private state is hidden."; diagnosticText.textContent = ""; diagnosticDetails.hidden = true; }
+    else if (status.privateStateIncluded) {
+      privateText.textContent = status.privateState ? JSON.stringify(status.privateState, null, 2) : "No private state available."; lastPrivateRevision = status.revision;
+      diagnosticDetails.hidden = false; diagnosticText.textContent = JSON.stringify({ lastAttempt: status.trackerDiagnostics ?? null, totals: status.trackerMetrics ?? null }, null, 2); privateDiagnosticKey = diagnosticKey;
+    } else if ((lastPrivateRevision !== status.revision || privateDiagnosticKey !== diagnosticKey) && !status.processing) { privateText.textContent = "Loading current private state…"; requestStatus(); }
   }
   async function handleSetupResult(payload) {
     const pending = pendingSetup;
@@ -366,6 +380,7 @@ export function setup(ctx) {
     activeChatId = chatId; routeGeneration++; latestStatus = null; pendingSetup = null; downloadText = null; download.hidden = true; startupFeedback = "";
     generationBusy = false; dirty = false; lastPrivateRevision = -1; cleanupToken = null; fillMissingSceneDetails = false; sceneChoiceDirty = false;
     privateText.textContent = showPrivate ? "Loading private state…" : "Private state is hidden.";
+    diagnosticText.textContent = ""; diagnosticDetails.hidden = true; diagnosticDetails.open = false; privateDiagnosticKey = ""; effectiveMode.textContent = trackingHint.textContent = "";
     statusText.textContent = chatId ? "Loading chat continuity…" : "Open a character chat to begin.";
     setupFeedback.textContent = "Save the original starting state and private profiles as a reusable JSON file.";
     setupFeedback.hidden = false;

@@ -1,9 +1,11 @@
 import { TRACKER_OUTPUT_JSON_SCHEMA, TrackerScopeError, materializeTrackerOutput, trackerStateForLlm } from "./schemas.js";
 import { buildRoutineTrackerContext } from "./context.js";
 import { createAliasRegistry, encodeModelState, encodeModelSources, encodeModelReferences, modelAliasCatalog, aliasOutputSchema, decodeModelOutput } from "./aliases.js";
+import { TRACKER_CONTRACT_VERSION, TRACKER_COLLECTIONS, TrackerValidationError } from "./protocol.js";
+import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 
 export const DEFAULT_CONFIG = Object.freeze({ enabled: true, showStatusWidget: true, connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000 });
-export const TRACKER_OUTPUT_MODES = ["auto", "openai", "anthropic", "plain"];
+export const TRACKER_OUTPUT_MODES = ["auto", "openai", "openai-responses", "anthropic", "google", "plain"];
 export function normalizeConfig(value = {}) {
   const bound = (entry, fallback, min, max) => Number.isFinite(Number(entry)) ? Math.max(min, Math.min(max, Math.round(Number(entry)))) : fallback;
   return { enabled: value.enabled !== false, showStatusWidget: value.showStatusWidget !== false,
@@ -25,7 +27,8 @@ world.date and world.time are the fictional narrative clock, never wall-clock ti
 Preserve recurring place descriptions and physical changes such as an unlocked door. Keep private place facts separate. Relationships reference supplied character aliases. Objectives have an established character owner, timing, and active/completed/abandoned status; completed objectives do not become new plans.
 On initialization return the full compact state. On routine updates return only selected entities and any new directly established entities; other saved entities are preserved by the backend. The identity catalog marks existing aliases with canUpdate. Entries with canUpdate false are reference-only: use them for identity lookup and character cross-references, but omit their entity records from the output. Never recreate an existing identity through a creation alias. All root collections remain required but may be empty; an empty collection does not delete saved records. Use action preserve for an existing unchanged section/entity and update for new or changed facts. New entities require update. Never return sourceMessageId; the backend owns provenance. No additional fields, prose, markdown, or comments.
 Example dialogue and creator notes are characterization guidance, not completed events. Alternate greetings are mutually exclusive and must not be merged. The actual selected opening overrides a default greeting. Lore is reference material, not evidence that described events already happened.
-Return exactly the JSON shape in the request's supplied schema.`;
+Return exactly the JSON shape in the request's supplied schema.
+The response uses compact change records: {id,action,changes:[{field,value}]}; world uses {action,changes}. Fields use the exact paths enumerated in the schema, such as visible.dressAndLayers or profile.preferences. Values are strings. Omit unchanged entities and unchanged fields; omitted changes preserve established facts. For preserve use an empty changes array. Do not copy full profiles. During initialization include every card character and extract all supported profile/appearance/scene facts; unestablished fields are filled with Unknown by the backend. On routine updates include only supported changes. New NPC/user declarations need their supplied creation alias, action update and a name change; unsupported biography, appearance and internal fields need not be supplied. The backend assigns role/controller. A creation slot listed in the catalog is NOT an existing character. Declare every referenced new character in characters in this same response. Never put Unknown, a name, user, or a place alias into an identity-reference field. If the user has no established name, use the neutral label User when explicitly declaring the user character.`;
 
 function initialScenePolicy(fillDetails) {
   return `INITIAL SCENE DEFAULTS — initialization only, chosen once and saved as the starting baseline.
@@ -59,13 +62,82 @@ export function resolveOutputMode(connection, mode) {
   return "plain";
 }
 
-export function generationParameters(connection, config, schema = TRACKER_OUTPUT_JSON_SCHEMA) {
-  const parameters = { temperature: 0, top_p: 0.1, max_tokens: config.maxTokens };
+export function generationParameters(connection, config, schema = TRACKER_OUTPUT_JSON_SCHEMA, { useResponsesApi = false } = {}) {
+  const parameters = { temperature: 0, top_p: 0.1, max_tokens: config.maxTokens, stop: [] };
+  if (typeof connection?.model === "string" && connection.model.trim()) parameters.model = connection.model.trim();
   const mode = resolveOutputMode(connection, config.outputMode);
-  if (mode === "openai") parameters.response_format = { type: "json_schema", json_schema: { name: "story_continuity_state", strict: true, schema } };
+  if (mode === "openai" || mode === "openai-responses") {
+    useResponsesApi = mode === "openai-responses" || useResponsesApi;
+    // Quiet calls merge the connection preset. Explicitly select the endpoint
+    // and replace its format so a narrative preset cannot change the contract.
+    parameters.use_responses_api = useResponsesApi;
+    parameters.response_format = useResponsesApi ? undefined : { type: "json_schema", json_schema: { name: "story_continuity_state", strict: true, schema } };
+    parameters.text = useResponsesApi ? { format: { type: "json_schema", name: "story_continuity_state", strict: true, schema } } : undefined;
+  }
   if (mode === "google") Object.assign(parameters, { responseMimeType: "application/json", responseSchema: schema });
   if (mode === "anthropic") parameters.tool_choice = { type: "tool", name: "record_story_state" };
   return parameters;
+}
+
+export function inspectTrackerResponse(response, mode) {
+  const calls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+  const matching = calls.filter(call => call?.name === "record_story_state");
+  const raw = matching.length ? matching[0].args : response?.content;
+  const rawText = typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
+  const parsed = extractJson(raw), finish = String(response?.finish_reason ?? "unknown");
+  let category = "json_object", message = "";
+  if (/length|max_tokens|max_output_tokens|token_limit/i.test(finish)) { category = "truncated"; message = "Tracker response reached its output token limit; return a compact complete replacement"; }
+  else if (/refus|content_filter|safety|blocked/i.test(`${finish} ${response?.stop_details?.type ?? ""} ${response?.stop_details?.category ?? ""}`)) { category = "refusal"; message = "Tracker response was refused or blocked by the provider"; }
+  else if (matching.length > 1) { category = "ambiguous_tool"; message = "Tracker returned multiple recording tool calls; return exactly one"; }
+  else if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    category = !rawText.trim() || raw == null || rawText === '""' ? response?.reasoning ? "reasoning_only" : mode === "anthropic" && calls.length ? "missing_tool" : "empty"
+      : parsed !== null || rawText.trim() === "null" ? "wrong_json_type" : "malformed_json";
+    message = `Tracker must return a JSON object (${category})`;
+  }
+  return { parsed, rawText, category, message, metadata: { finishReason: finish, contentChars: String(response?.content ?? "").length, toolCalls: calls.length,
+    usage: { promptTokens: response?.usage?.prompt_tokens ?? response?.usage?.input_tokens ?? 0, completionTokens: response?.usage?.completion_tokens ?? response?.usage?.output_tokens ?? 0 } } };
+}
+
+function targetedRepairPlan(parsed, error, registry) {
+  if (!(error instanceof TrackerValidationError) || !error.issues.length) return null;
+  const targets = Object.fromEntries(["world", ...TRACKER_COLLECTIONS].map(kind => [kind, new Set()]));
+  for (const issue of error.issues) {
+    if (issue.kind === "world") { targets.world.add("world"); continue; }
+    const record = registry.reverse.get(issue.recordId) ?? registry.creation.get(issue.recordId);
+    if (!record || record.kind !== issue.kind || !Array.isArray(parsed[issue.kind])) return null;
+    targets[issue.kind].add(issue.recordId);
+  }
+  return targets;
+}
+
+function mergeTrackerRepair(original, repaired, targets, registry) {
+  if (!targets) return repaired;
+  if (!repaired || typeof repaired !== "object" || Array.isArray(repaired)) throw new Error("Repair must return a JSON object");
+  if (repaired.schemaVersion !== 2 || Object.keys(repaired).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Repair has an unsupported schema version or unexpected root fields");
+  const merged = structuredClone(original);
+  if (targets.world.size) {
+    if (!repaired.world || repaired.world.action !== "update") throw new Error("Repair must replace the rejected world changes");
+    merged.world = repaired.world;
+  }
+  for (const kind of TRACKER_COLLECTIONS) {
+    const replacements = repaired[kind] ?? [];
+    if (!Array.isArray(replacements)) throw new Error(`Repair ${kind} must be an array`);
+    const ids = replacements.map(entry => typeof entry?.id === "string" ? entry.id.trim() : null);
+    if (new Set(ids).size !== ids.length || ids.includes(null)) throw new Error(`Repair ${kind} has invalid or duplicate aliases`);
+    for (const id of targets[kind]) if (!ids.includes(id)) throw new Error(`Repair omitted rejected ${kind} record ${id}; correct it explicitly rather than dropping it`);
+    const retained = (merged[kind] ?? []).filter(entry => !targets[kind].has(entry.id?.trim()));
+    const retainedIds = new Set(retained.map(entry => entry.id?.trim()));
+    // Already validated records are frozen. New declarations may supply missing
+    // dependencies; all merged references are validated again before commit.
+    for (const entry of replacements) {
+      const id = entry.id.trim();
+      const identity = registry.reverse.get(id) ?? registry.creation.get(id);
+      if (!identity || identity.kind !== kind) throw new Error(`Repair ${kind} contains an unknown or wrong-type alias ${JSON.stringify(id)}`);
+      if (targets[kind].has(id) || !retainedIds.has(id) && registry.creation.get(id)?.kind === kind) retained.push(entry);
+    }
+    merged[kind] = retained;
+  }
+  return merged;
 }
 
 export async function runTracker(api, input, rawConfig, userId) {
@@ -76,9 +148,25 @@ export async function runTracker(api, input, rawConfig, userId) {
     connection = await api.connections.get(config.connectionId, userId);
     if (!connection) throw new Error("Selected tracker connection is unavailable; choose another connection.");
   } else { try { connection = (await api.connections.list(userId)).find(entry => entry.is_default) ?? null; } catch { /* host default */ } }
+  const diagnostics = { contract: TRACKER_CONTRACT_VERSION, provider: connection?.provider ?? "unknown", model: connection?.model ?? "unknown",
+    connectionId: connection?.id ?? config.connectionId, sourceMessageId: input.sourceMessageId, outputMode: resolveOutputMode(connection, config.outputMode),
+    startedAt: Date.now(), elapsedMs: 0, outcome: "generating", notes: [], attempts: [] };
+  let useResponsesApi = false;
+  if (connection?.preset_id && api.presets?.get && (api.permissions?.has?.("presets") ?? true)) {
+    try { useResponsesApi = (await api.presets.get(connection.preset_id, userId))?.parameters?.use_responses_api === true; }
+    catch { diagnostics.notes.push("Preset metadata unavailable; OpenAI mode uses Chat Completions. Select OpenAI Responses JSON Schema explicitly when required."); }
+  } else if (connection?.preset_id && diagnostics.outputMode === "openai") {
+    diagnostics.notes.push("Preset inspection is unavailable without the host Presets permission. OpenAI mode uses Chat Completions; select OpenAI Responses JSON Schema explicitly when required.");
+  }
+  if (diagnostics.outputMode === "plain") diagnostics.notes.push("Prompt-only JSON: this connection has no recognized structured-output mode. Select an explicit mode if the provider supports one.");
+  if (diagnostics.outputMode === "openai" && useResponsesApi) diagnostics.outputMode = "openai-responses";
+  const report = async outcome => {
+    diagnostics.outcome = outcome; diagnostics.elapsedMs = Date.now() - diagnostics.startedAt;
+    await input.onDiagnostic?.(normalizeTrackerDiagnostics(diagnostics));
+  };
   const routine = input.initialize ? null : buildRoutineTrackerContext(input);
   const scope = { allowedUpdateIds: routine?.allowedUpdateIds };
-  const registry = createAliasRegistry(input.sources, input.previousState), schema = aliasOutputSchema(registry, scope);
+  const registry = createAliasRegistry(input.sources, input.previousState), schema = aliasOutputSchema(registry, { ...scope, patches: true });
   const catalog = `SUPPLIED ID ALIASES (canUpdate false means reference-only: omit that entity record; creation aliases require a genuinely new identity and action update)\n${JSON.stringify(modelAliasCatalog(registry, scope))}`;
   const content = input.initialize
     ? input.refreshProfiles
@@ -90,20 +178,33 @@ export async function runTracker(api, input, rawConfig, userId) {
   // One shared deadline covers both the original attempt and its single repair.
   const signal = AbortSignal.timeout(Math.min(config.timeoutMs, input.remainingMs ?? config.timeoutMs));
   const request = attempt => {
-    const dto = { type: "quiet", messages: attempt, parameters: generationParameters(connection, config, schema), reasoning: { source: "off" }, signal };
+    const dto = { type: "quiet", messages: attempt, parameters: generationParameters(connection, config, schema, { useResponsesApi }), reasoning: { source: "off" }, signal };
     if (userId) dto.userId = userId;
-    if (config.connectionId) dto.connection_id = config.connectionId;
+    if (connection?.id || config.connectionId) dto.connection_id = connection?.id || config.connectionId;
     if (resolveOutputMode(connection, config.outputMode) === "anthropic") dto.tools = [{ name: "record_story_state", description: "Record complete private story continuity state.", parameters: schema }];
     return dto;
   };
-  let diagnostic = "";
+  let diagnostic = "", repairOriginal = null, repairTargets = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await input.onProgress?.({ stage: "repairing", attempt: 2 });
-    const response = await api.generate.quiet(request(messages));
+    const started = Date.now();
+    let response;
+    try { response = await api.generate.quiet(request(messages)); }
+    catch (error) {
+      const category = signal.aborted || /abort|timeout/i.test(error.name ?? "") ? "timeout" : "transport";
+      diagnostics.attempts.push({ attempt: attempt + 1, category, finishReason: "unavailable", elapsedMs: Date.now() - started,
+        issues: [{ path: "generation", code: category, message: String(error.message ?? error) }] });
+      await report("failed");
+      throw Object.assign(new Error(`Tracker generation failed (${category}): ${String(error.message ?? error)}`), { code: "TRACKER_GENERATION_FAILED", diagnostics: normalizeTrackerDiagnostics(diagnostics) });
+    }
     await input.onProgress?.({ stage: "validating", attempt: attempt + 1 });
-    const tool = response?.tool_calls?.find(call => call.name === "record_story_state");
-    const parsed = extractJson(tool?.args ?? response?.content);
+    const inspected = inspectTrackerResponse(response, resolveOutputMode(connection, config.outputMode));
+    const detail = { attempt: attempt + 1, category: inspected.category, ...inspected.metadata, elapsedMs: Date.now() - started, issues: [], excerpt: "" };
+    diagnostics.attempts.push(detail);
+    let parsed = inspected.parsed;
     try {
+      if (inspected.message) throw new Error(inspected.message);
+      if (attempt) parsed = mergeTrackerRepair(repairOriginal, parsed, repairTargets, registry);
       const state = materializeTrackerOutput(decodeModelOutput(parsed, registry), input.previousState, input.sourceMessageId, scope);
       for (const card of input.sources.cards) if (!state.characters.some(char => char.id === `char:${card.id}` && char.role === "main")) throw new Error("Every card character must be recorded with its exact id and main role");
       if (scenePolicy) {
@@ -113,14 +214,29 @@ export async function runTracker(api, input, rawConfig, userId) {
         }
         if (missing.length) throw new Error(`Initial scene requires ${missing.join(", ")}; keep source facts or choose compatible fictional starting defaults under the initial scene policy, including an explicit clothing condition when an outfit does not apply`);
       }
+      detail.category = "valid";
+      await report(attempt ? "repaired" : "first_pass");
       return state;
     } catch (error) {
       diagnostic = registry.rewriteText(error.message);
+      detail.category = inspected.message ? inspected.category : "state_validation";
+      detail.issues = error.issues ?? [{ path: "state", code: "state_validation", message: diagnostic }];
+      detail.excerpt = inspected.rawText;
       const scopeRepair = error instanceof TrackerScopeError
         ? ` Reference-only records rejected: ${registry.rewriteText(JSON.stringify(error.violations))}. Remove ALL listed records from their collections; their saved facts remain intact. Do not recreate them with creation aliases.` : "";
-      if (attempt === 0) messages.push({ role: "assistant", content: registry.rewriteText(JSON.stringify(parsed ?? {})) },
-        { role: "user", content: `Repair the rejected state: ${diagnostic}\n${scopeRepair} Return only entity records whose catalog entry has canUpdate true, plus genuinely new entities using supplied creation aliases. Declare every new referenced character in this response. Return one schema-conforming object with all root collections (empty arrays are allowed). Keep supported updates to selected entities. Preserve prior facts and use Unknown for missing facts${scenePolicy ? " outside the authorized initial scene defaults" : ""}.` });
+      if (attempt === 0) {
+        repairOriginal = parsed;
+        repairTargets = targetedRepairPlan(parsed, error, registry);
+        const repairScope = repairTargets ? `TARGETED REPAIR: replace every listed rejected record; do not omit any. Other validated records and their declarations are retained locally. Return only replacements and required new character declarations. Targets: ${JSON.stringify(Object.fromEntries(Object.entries(repairTargets).map(([kind, ids]) => [kind, [...ids]])))}.`
+          : "Return a complete replacement, retaining all valid supported changes from the rejected response.";
+        messages.push({ role: "assistant", content: registry.rewriteText(inspected.rawText.slice(0, 128000)) || "[The prior response was empty.]" },
+          { role: "user", content: `Repair the rejected state: ${diagnostic}\nALL VALIDATION ISSUES\n${registry.rewriteText(JSON.stringify(detail.issues))}\n${scopeRepair}\n${repairScope}\nReturn only entity records whose catalog entry has canUpdate true, plus genuinely new entities using supplied creation aliases. Declare every new referenced character. Existing character aliases and names: ${JSON.stringify(modelAliasCatalog(registry).existing.characters)}. Never guess an identity or invent a missing character to justify an invalid relationship. Return one compact schema-conforming JSON object with all root collections (empty arrays are allowed). Preserve prior facts; unsupported facts remain Unknown${scenePolicy ? " outside the authorized initial scene defaults" : ""}.` });
+        await report("repairing");
+      }
     }
   }
-  throw Object.assign(new Error(`Tracker state rejected after one repair: ${diagnostic}`), { code: "TRACKER_STATE_REJECTED" });
+  await report("failed");
+  const last = diagnostics.attempts.at(-1);
+  throw Object.assign(new Error(`Tracker state rejected after one repair: ${diagnostic}; finish=${last.finishReason}; contentChars=${last.contentChars}; toolCalls=${last.toolCalls}`),
+    { code: "TRACKER_STATE_REJECTED", diagnostics: normalizeTrackerDiagnostics(diagnostics) });
 }

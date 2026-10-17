@@ -1,5 +1,6 @@
 import { cloneEmptyState, validateState, remapStateSources } from "./schemas.js";
 import { buildRoleplayContext } from "./context.js";
+import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 
 export const SETUP_FORMAT = "story-continuity-initial-setup";
 export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the Story Continuity drawer when ready.";
@@ -104,13 +105,17 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
     initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    initializationMode: "", fillMissingSceneDetails: false, setupProgress: null, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
+    trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
+    lastTrackedMessageId: "", initializationMode: "", fillMissingSceneDetails: false, setupProgress: null, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
 export function normalizeStore(value, chatId) {
   const empty = createStore(chatId);
   if (!value || value.schemaVersion !== 1 || value.chatId !== chatId) return empty;
   const next = { ...empty, ...value, processing: false };
+  next.trackerDiagnostics = normalizeTrackerDiagnostics(value.trackerDiagnostics);
+  next.trackerMetrics = Object.fromEntries(Object.keys(empty.trackerMetrics).map(key => [key, Number.isFinite(value.trackerMetrics?.[key]) && value.trackerMetrics[key] >= 0 ? value.trackerMetrics[key] : 0]));
+  next.lastTrackedMessageId = typeof value.lastTrackedMessageId === "string" ? value.lastTrackedMessageId.slice(0, 180) : "";
   next.fillMissingSceneDetails = value.fillMissingSceneDetails === true;
   const progress = value.setupProgress;
   next.setupProgress = progress && ["setup", "reading", "generating", "validating", "repairing", "saving", "ready"].includes(progress.stage)
@@ -124,7 +129,8 @@ export function normalizeStore(value, chatId) {
       error: typeof progress.error === "string" ? progress.error.slice(0, 1200) : "",
     } : null;
   next.rejectedTurn = typeof value.rejectedTurn?.signature === "string" && typeof value.rejectedTurn?.error === "string"
-    ? { signature: value.rejectedTurn.signature, error: value.rejectedTurn.error.slice(0, 450) } : null;
+    ? { signature: value.rejectedTurn.signature, error: value.rejectedTurn.error.slice(0, 450),
+      messageId: typeof value.rejectedTurn.messageId === "string" ? value.rejectedTurn.messageId.slice(0, 180) : "" } : null;
   next.initializationMode = value.initializationMode === "create" || value.baseline || value.revision > 0 ? "create" : "";
   next.checkpoints = value.checkpoints && typeof value.checkpoints === "object" && !Array.isArray(value.checkpoints) ? value.checkpoints : {};
   try {

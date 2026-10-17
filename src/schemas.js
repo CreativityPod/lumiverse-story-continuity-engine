@@ -81,6 +81,10 @@ function validateNode(value, schema, path) {
   return clean;
 }
 
+export function validateTrackerRecord(value, kind, path) {
+  return validateNode(value, kind === "world" ? TRACKER_OUTPUT_JSON_SCHEMA.properties.world : TRACKER_OUTPUT_JSON_SCHEMA.properties[kind].items, path);
+}
+
 function checkReferences(state, allowedSources) {
   for (const key of ["characters", "relationships", "places", "objectives"]) {
     const ids = new Set();
@@ -127,7 +131,21 @@ export class TrackerScopeError extends Error {
 }
 
 export function materializeTrackerOutput(value, previousState, sourceMessageId, { allowedUpdateIds } = {}) {
-  const output = validateNode(value, TRACKER_OUTPUT_JSON_SCHEMA, "output");
+  // Preserved payload fields have no authority. Restore from saved state before
+  // validating fields that the model may have unnecessarily copied or invented.
+  const restored = structuredClone(value);
+  if (previousState && restored && typeof restored === "object") {
+    if (restored.world?.action === "preserve") restored.world = { ...previousState.world, action: "preserve" };
+    if (restored.world) delete restored.world.sourceMessageId;
+    for (const kind of ["characters", "relationships", "places", "objectives"]) if (Array.isArray(restored[kind])) restored[kind] = restored[kind].map(candidate => {
+      const prior = previousState[kind].find(entry => entry.id === candidate?.id);
+      if (candidate?.action !== "preserve" || !prior) return candidate;
+      if (kind === "characters" && ["role", "controller"].some(key => candidate[key] !== undefined && candidate[key] !== prior[key])) throw new Error("An established character's role and controller cannot be changed");
+      const { sourceMessageId: ignored, ...data } = prior;
+      return { ...data, action: "preserve" };
+    });
+  }
+  const output = validateNode(restored, TRACKER_OUTPUT_JSON_SCHEMA, "output");
   for (const key of ["characters", "relationships", "places", "objectives"]) {
     if (new Set(output[key].map(entry => entry.id)).size !== output[key].length) throw new Error(`${key} contains duplicate ids`);
   }

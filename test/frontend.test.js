@@ -72,6 +72,23 @@ test("drawer preserves unsaved settings and sends one concrete settings payload"
     h.button("Save Settings").click(); const payload = h.sent.at(-1); assert.equal(payload.type, "story_save_config"); assert.equal(payload.config.maxTokens, 9000); assert.equal(payload.config.timeoutMs, 120000);
   } finally { h.restore(); }
 });
+
+test("tracker diagnostics require private inspection, render as text and clear on hide or navigation", () => {
+  const h = mountHarness();
+  try {
+    const trackerInfo = { outputMode: "plain", provider: "test", model: "model", lastAttemptAt: 100, outcome: "failed", retryPaused: true, pendingMessageId: "a1", lastTrackedMessageId: "a0" };
+    h.status({ code: "degraded", trackerInfo });
+    assert.match(document.body.textContent, /prompt-only JSON/); assert.match(document.body.textContent, /Showing the saved failure for message a1/);
+    const checkbox = document.querySelector('[aria-label="Show Private Tracker State"]'); checkbox.checked = true; checkbox.dispatchEvent(new window.Event("change"));
+    h.status({ code: "degraded", trackerInfo, privateStateIncluded: true, trackerDiagnostics: { attempts: [{ excerpt: '<script>PRIVATE_EXCERPT</script>' }] } });
+    assert.ok(document.body.textContent.includes("PRIVATE_EXCERPT")); assert.equal(document.querySelectorAll("script").length, 0);
+    checkbox.checked = false; checkbox.dispatchEvent(new window.Event("change"));
+    assert.ok(!document.body.textContent.includes("PRIVATE_EXCERPT"));
+    checkbox.checked = true; checkbox.dispatchEvent(new window.Event("change"));
+    h.status({ trackerInfo, privateStateIncluded: true, trackerDiagnostics: { attempts: [{ excerpt: "PRIVATE_EXCERPT" }] } });
+    h.events.get("CHAT_SWITCHED")({ chatId: "other" }); assert.ok(!document.body.textContent.includes("PRIVATE_EXCERPT"));
+  } finally { h.restore(); }
+});
 test("chat navigation clears private display and rejects delayed setup responses", () => {
   const h = mountHarness();
   try {

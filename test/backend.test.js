@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
-import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns } from "../src/state.js";
+import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns, fingerprint } from "../src/state.js";
 import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState, modelOutput } from "./fixtures.js";
 
@@ -48,6 +48,43 @@ function addLegacyNotice(h, phase = "ready", id = "legacy-notice") {
   const notice = { id, role: "system", content: INITIALIZATION_NOTICE_TEXT[phase], metadata: { story_continuity_notice: { version: 1, status: phase } } };
   h.messages.get("chat").push(notice); return notice;
 }
+
+test("failed response evidence stays private, persists across restart, and exposes pending/last tracked turns", async () => {
+  const h = harness(); await h.select(); const previous = (await h.engine.loadStore("chat")).current;
+  h.addTurn("Ada nods."); h.setResponse(async () => ({ content: "PRIVATE_RESPONSE_EXCERPT", finish_reason: "length", usage: { completion_tokens: 30 } }));
+  await h.engine.schedule("chat", {}, "owner");
+  const failed = await h.engine.loadStore("chat");
+  assert.deepEqual(failed.current, previous); assert.equal(failed.trackerMetrics.firstPass, 1); assert.equal(failed.trackerMetrics.failed, 1);
+  assert.equal(failed.trackerMetrics.completionTokens, 60);
+  assert.equal(failed.trackerDiagnostics.attempts[1].excerpt, "PRIVATE_RESPONSE_EXCERPT");
+  const publicStatus = await h.engine.status("chat", "owner", false);
+  assert.equal(publicStatus.trackerInfo.retryPaused, true); assert.equal(publicStatus.trackerInfo.pendingMessageId, "a1");
+  assert.equal(publicStatus.trackerInfo.lastTrackedMessageId, "a0");
+  assert.ok(!JSON.stringify(publicStatus).includes("PRIVATE_RESPONSE_EXCERPT"));
+  assert.ok(![...h.variables.values()].join(" ").includes("PRIVATE_RESPONSE_EXCERPT"));
+  const restarted = createStoryEngine(h.api);
+  await restarted.schedule("chat", {}, "owner"); assert.equal(h.requests.length, 3);
+  const privateStatus = await restarted.status("chat", "owner", true);
+  assert.equal(privateStatus.trackerDiagnostics.attempts.length, 2);
+  assert.ok(JSON.stringify(privateStatus).includes("PRIVATE_RESPONSE_EXCERPT"));
+  h.setResponse(null); await restarted.schedule("chat", { reprocess: true }, "owner");
+  const recovered = await restarted.status("chat", "owner", true);
+  assert.equal(recovered.trackerInfo.pendingMessageId, ""); assert.equal(recovered.trackerInfo.lastTrackedMessageId, "a1");
+  assert.equal(recovered.trackerMetrics.firstPass, 2);
+});
+
+test("upgrading the tracker contract releases an old rejection pause without replaying valid checkpoints", async () => {
+  const h = harness(); await h.select(); h.addTurn("Ada nods."); h.setResponse(async () => ({ content: "invalid" }));
+  await h.engine.schedule("chat", {}, "owner");
+  const path = [...h.files.keys()].find(key => key.startsWith("chats/")), store = h.files.get(path);
+  const turns = listEligibleTurns(h.messages.get("chat")), turn = turns.at(-1);
+  store.rejectedTurn.signature = fingerprint({ contract: 1, userId: "owner", epoch: store.epoch, sources: store.sourceFingerprint,
+    previousState: store.baseline, turn: turn.fingerprint, focusCharacterId: turn.assistant.character_id,
+    connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000 });
+  h.setResponse(null); const restarted = createStoryEngine(h.api);
+  await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 4); assert.equal((await restarted.loadStore("chat")).lastError, "");
+});
 
 test("automatic starting outfits persist on reopen and export while turns update clothing and place state", async () => {
   const h = harness();
@@ -314,7 +351,7 @@ test("failed initialization keeps the opening target available for retry without
   assert.equal((await h.engine.status("chat", "owner")).setupTargetMessageId, "a0");
   assert.equal((await h.engine.loadStore("chat")).current, null);
   const failure = (await h.engine.status("chat", "owner")).setupProgress;
-  assert.equal(failure.stage, "generating"); assert.equal(failure.status, "failed"); assert.equal(failure.error, "PRIVATE_DIAGNOSTIC_WITH_SECRET");
+  assert.equal(failure.stage, "generating"); assert.equal(failure.status, "failed"); assert.match(failure.error, /Tracker generation failed \(transport\): PRIVATE_DIAGNOSTIC_WITH_SECRET/);
   h.setResponse(null); await h.engine.schedule("chat", {}, "owner");
   await h.open(); await h.events.get("MESSAGE_SENT")({ chatId: "chat" }, "owner");
   await h.engine.handleFrontend({ type: "story_set_widget_visibility", chatId: "chat", showStatusWidget: false }, "owner");
