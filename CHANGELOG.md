@@ -1,5 +1,6 @@
 # 1.6.3
 
+- Present the scene clock consistently in the drawer, turn injection and visual macro: month/day without Gregorian years, 12-hour AM/PM times and short time-of-day descriptions. Preserve source-established seasons and descriptions alongside exact clock values; keep standalone approximate values usable. Shared rendering preserves internal calendar precision and existing JSON formats, with no new model call or migration. Version remains 1.6.3.
 - Fill unresolved initial date, time and weather in backend code, including Unknown, omitted and preserved-without-a-value responses. These fields no longer depend on the model following the scene-default policy or consume the single repair attempt.
 - Save random fictional defaults before generation and reuse them for repair, explicit retry and worker restarts with the same sources. Extracted known, partial and fictional-calendar values take precedence. Successful canonical values travel through ordinary checkpoints, forks and portable setups.
 - Keep routine updates, imported profile refresh, existing saved scenes, clothing rules and invalid-clock validation unchanged. No extra model call or canonical/portable schema change; tracker contract is now 6.

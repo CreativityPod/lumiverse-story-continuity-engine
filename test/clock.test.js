@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeStoryClockValue, createInitialWorldDefaults, normalizeInitialWorldDefaults, applyInitialWorldDefaults, INITIAL_WEATHER_CHOICES } from "../src/clock.js";
+import { normalizeStoryClockValue, formatStoryClockValue, createInitialWorldDefaults, normalizeInitialWorldDefaults, applyInitialWorldDefaults, INITIAL_WEATHER_CHOICES } from "../src/clock.js";
 import { expandTrackerRecord } from "../src/protocol.js";
 import { fixtureState } from "./fixtures.js";
 
@@ -27,9 +27,26 @@ test("exact fictional dates and local times normalize without using the host clo
   }
 });
 test("invalid exact calendar and clock values reject with a field-specific repair path", () => {
-  for (const [field, values] of [["date", ["2031-02-29", "1900-02-29", "2031-04-31", "2031-13-01", "2031-00-01"]], ["time", ["24:00", "12:60", "12:00:60", "0:30 AM", "13:00 PM"]]]) {
+  for (const [field, values] of [["date", ["2031-02-29", "1900-02-29", "2031-04-31", "2031-13-01", "2031-00-01", "2031-02-29 (Winter)"]], ["time", ["24:00", "12:60", "12:00:60", "0:30 AM", "13:00 PM", "25:15 (Night)"]]]) {
     for (const value of values) assert.throws(() => normalizeStoryClockValue(field, value), error => error.path === `world.${field}` && error.code === "invalid_clock");
   }
+});
+
+test("clock presentation omits Gregorian years, uses AM/PM and keeps narrative descriptions", () => {
+  for (const [input, expected] of [
+    ["2031-10-17 (Fall)", "October 17 (Fall)"], ["2031-6-2", "June 2"], ["2000-02-29", "February 29"],
+    ["October 13, 2031 (Early fall)", "October 13 (Early fall)"], ["Fall", "Fall"], ["Day 2, early spring", "Day 2, early spring"],
+    ["October 13", "October 13"], ["Unknown", "Unknown"],
+  ]) assert.equal(formatStoryClockValue("date", input), expected);
+  for (const [input, expected] of [
+    ["00:00", "12:00 AM (Midnight)"], ["02:54", "02:54 AM (Late night)"], ["14:54", "02:54 PM (Afternoon)"],
+    ["12:00", "12:00 PM (Noon)"], ["12:01", "12:01 PM (Afternoon)"], ["06:05", "06:05 AM (Early morning)"],
+    ["08:30", "08:30 AM (Morning)"], ["18:30", "06:30 PM (Evening)"], ["23:59:30", "11:59:30 PM (Night)"],
+    ["2:54 pm (After lunch)", "02:54 PM (After lunch)"], ["Midnight", "12:00 AM (Midnight)"],
+    ["Late afternoon", "Late afternoon"], ["Unknown", "Unknown"],
+  ]) assert.equal(formatStoryClockValue("time", input), expected);
+  assert.equal(normalizeStoryClockValue("date", "2031-6-2 (Summer)"), "2031-06-02 (Summer)");
+  assert.equal(normalizeStoryClockValue("time", "2:54 pm (After lunch)"), "14:54 (After lunch)");
 });
 test("compact and legacy tracker clock proposals normalize while preserve and omitted fields retain saved facts", () => {
   const { sourceMessageId, ...world } = fixtureState().world;

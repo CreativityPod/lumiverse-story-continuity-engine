@@ -28,11 +28,48 @@ function applyInitialWorldDefaults(world, defaults) {
   return filled;
 }
 
+const CLOCK_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function clockParts(value) {
+  const text = value.trim(), match = text.match(/^(.*?)\s+\(([^()\r\n]+)\)$/);
+  return match ? { value: match[1], description: match[2].trim() } : { value: text, description: "" };
+}
+const withClockDescription = (value, description) => description ? `${value} (${description})` : value;
+function clockPeriod(hour, minute, second) {
+  if (!minute && !second && hour === 0) return "Midnight";
+  if (!minute && !second && hour === 12) return "Noon";
+  return hour < 5 ? "Late night" : hour < 8 ? "Early morning" : hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : hour < 21 ? "Evening" : "Night";
+}
+
+// Readable story presentation; canonical values retain their calendar precision.
+// Seasons are retained from story facts, never inferred from a Gregorian month.
+function formatStoryClockValue(field, value) {
+  if (typeof value !== "string") return value;
+  let normalized;
+  try { normalized = normalizeStoryClockValue(field, value); } catch { return value; }
+  const parts = clockParts(normalized);
+  if (field === "date") {
+    const exact = parts.value.match(/^\d{4}-(\d{2})-(\d{2})$/);
+    if (exact) return withClockDescription(`${CLOCK_MONTHS[Number(exact[1]) - 1]} ${Number(exact[2])}`, parts.description);
+    const monthNames = CLOCK_MONTHS.join("|");
+    const written = parts.value.match(new RegExp(`^(${monthNames}) (\\d{1,2})(?:st|nd|rd|th)?,? \\d{4}$`, "i"));
+    if (written) return withClockDescription(`${written[1]} ${Number(written[2])}`, parts.description);
+  }
+  if (field === "time") {
+    const exact = parts.value.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (exact) {
+      const hour = Number(exact[1]), minute = Number(exact[2]), second = Number(exact[3] ?? 0);
+      const display = `${String(hour % 12 || 12).padStart(2, "0")}:${exact[2]}${exact[3] === undefined ? "" : `:${exact[3]}`} ${hour < 12 ? "AM" : "PM"}`;
+      return withClockDescription(display, parts.description || clockPeriod(hour, minute, second));
+    }
+  }
+  return value;
+}
+
 // Normalize only unambiguous exact values proposed by the tracker. Partial dates,
 // fictional calendars, approximate times and existing saved facts remain usable.
 function normalizeStoryClockValue(field, value) {
   if (typeof value !== "string") return value;
-  const text = value.trim();
+  const { value: text, description } = clockParts(value);
   const invalid = () => { throw Object.assign(new Error(`world.${field} has an invalid exact ${field}; use a valid fictional calendar date or local clock time`), { path: `world.${field}`, code: "invalid_clock" }); };
   if (field === "date") {
     const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
@@ -41,11 +78,11 @@ function normalizeStoryClockValue(field, value) {
     const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
     const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     if (month < 1 || month > 12 || day < 1 || day > days[month - 1]) invalid();
-    return `${yearText}-${monthText.padStart(2, "0")}-${dayText.padStart(2, "0")}`;
+    return withClockDescription(`${yearText}-${monthText.padStart(2, "0")}-${dayText.padStart(2, "0")}`, description);
   }
   if (field === "time") {
-    if (/^midnight$/i.test(text)) return "00:00";
-    if (/^noon$/i.test(text)) return "12:00";
+    if (/^midnight$/i.test(text)) return withClockDescription("00:00", description);
+    if (/^noon$/i.test(text)) return withClockDescription("12:00", description);
     const match = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?m\.?)?$/i);
     if (!match) return value;
     let hour = Number(match[1]);
@@ -53,7 +90,7 @@ function normalizeStoryClockValue(field, value) {
     const meridiem = match[4]?.replace(/\./g, "").toLowerCase();
     if (minute > 59 || second !== null && second > 59 || (meridiem ? hour < 1 || hour > 12 : hour > 23)) invalid();
     if (meridiem) hour = hour % 12 + (meridiem === "pm" ? 12 : 0);
-    return `${String(hour).padStart(2, "0")}:${match[2]}${second === null ? "" : `:${match[3]}`}`;
+    return withClockDescription(`${String(hour).padStart(2, "0")}:${match[2]}${second === null ? "" : `:${match[3]}`}`, description);
   }
   return value;
 }
@@ -684,7 +721,7 @@ const promptFields = (record, labels) => Object.entries(labels).filter(([key]) =
 function renderContinuityContext(context, { visualOnly = false } = {}) {
   const world = context.world ?? {}, characters = context.characters ?? [], places = context.places ?? [];
   const lines = ["CURRENT SCENE"];
-  const when = [world.date, world.time].filter(hasPromptValue).map(promptValue).join("; ");
+  const when = ["date", "time"].filter(key => hasPromptValue(world[key])).map(key => promptValue(formatStoryClockValue(key, world[key]))).join("; ");
   if (when) lines.push(`WHEN: ${when}`);
   for (const [key, label] of Object.entries({ sceneStatus: "LIFECYCLE", weather: "WEATHER", location: "LOCATION", immediateContext: "CONTEXT", proximityAndContact: "PROXIMITY & CONTACT" })) {
     if (hasPromptValue(world[key])) lines.push(`${label}: ${promptValue(world[key])}`);
@@ -1160,7 +1197,7 @@ Every entity id is a backend-supplied short alias for this request. Card charact
 The user controls their own character. User internal fields must all be Unknown, even if the recorder could guess them. Only record user appearance, outfit, position, belongings, and actions explicitly established by the user or direct consequences of canonical events. Do not create objectives for the user unless they stated them.
 Track each model character's mood, immediate intent, knowledge, beliefs, and concerns independently, supported by their profile and the interaction. Never give a character another's private information unless they learned it. Do not manufacture hidden plans or internal changes solely to improve the story. Record qualitative states, not numerical scores or guaranteed outcomes. Consent is action-specific, never inferred from mood, trust, clothing, attraction, physiology, or silence.
 visible contains only established observable appearance, clothing/layers, physical condition, position, activity, and items. Do not include secret affiliations, motives, thoughts, private history, or hidden knowledge in visible fields, public relationship status, place descriptions, or world context. Outside the explicit initialization policy, unknown clothing stays Unknown. Preserve item ownership, layering, injuries, contact, and positions until changed by a canonical cause.
-world.date and world.time are the fictional narrative clock, never wall-clock time. Ignore message timestamps, real response delay, and generation latency. When an exact Gregorian date including its year is established, record YYYY-MM-DD; record an exact local time as 24-hour HH:mm (include seconds only when established and relevant). Preserve approximate or partial values such as late afternoon, October 13, Day 2 or a fictional calendar; never invent a missing year, calendar, timezone, minute or second. Advance only by completed fictional action or stated elapsed time. Resolve supported elapsed durations against the saved clock, carrying midnight, month and year rollovers into world.date in the same update. For example, 2031-12-31 at 23:50 plus an explicitly elapsed 20 minutes becomes 2032-01-01 at 00:10. Preserve uncertainty when a duration or starting instant is approximate. A new date alone does not imply a new time; a new time alone must not silently reset the date. On initialization or a selected opening, record the starting clock without advancing it again. Observation, analysis and real waiting do not advance time. Weather changes only when the narrative supports it.
+world.date and world.time are the fictional narrative clock, never wall-clock time. Ignore message timestamps, real response delay, and generation latency. When an exact Gregorian date including its year is established, record YYYY-MM-DD; record an exact local time as 24-hour HH:mm (include seconds only when established and relevant). Preserve approximate or partial values such as late afternoon, October 13, Day 2 or a fictional calendar; never invent a missing year, calendar, timezone, minute or second. Retain source-established descriptions of the season or time of day alongside a supported exact value in parentheses, for example 2031-10-17 (Fall) or 14:54 (Late afternoon). A description alone remains valid when no exact date/time is known. Keep descriptions consistent as the narrative advances; never infer a season or hemisphere merely from a month, or daylight from a clock. The drawer and labeled scene text present month/day without a year and 12-hour AM/PM times; the private tracker retains calendar precision for rollovers. Advance only by completed fictional action or stated elapsed time. Resolve supported elapsed durations against the saved clock, carrying midnight, month and year rollovers into world.date in the same update. For example, 2031-12-31 at 23:50 plus an explicitly elapsed 20 minutes becomes 2032-01-01 at 00:10. Preserve uncertainty when a duration or starting instant is approximate. A new date alone does not imply a new time; a new time alone must not silently reset the date. On initialization or a selected opening, record the starting clock without advancing it again. Observation, analysis and real waiting do not advance time. Weather changes only when the narrative supports it.
 Preserve recurring place descriptions and physical changes such as an unlocked door. Keep private place facts separate. Relationships reference supplied character aliases. Objectives have an established character owner, timing, and active/completed/abandoned status; completed objectives do not become new plans. When an objective's relative deadline can be resolved exactly against the established fictional clock, include that date/time in timing; otherwise retain the relative or approximate wording.
 On initialization there is no saved baseline: explicitly extract supported facts and the required starting values as action update field changes. During routine tracking return only selected entities and any new directly established entities; other saved entities are preserved by the backend. The identity catalog marks existing aliases with canUpdate. Entries with canUpdate false are reference-only: use them for identity lookup and character cross-references, but omit their entity records from the output. Never recreate an existing identity through a creation alias. All root collections remain required but may be empty; an empty collection does not delete saved records. Use action preserve for an existing unchanged section/entity and update for new or changed facts. New entities require update. Never return sourceMessageId; the backend owns provenance. No additional fields, prose, markdown, or comments.
 Example dialogue and creator notes are characterization guidance, not completed events. Alternate greetings are mutually exclusive and must not be merged. The actual selected opening overrides a default greeting. Lore is reference material, not evidence that described events already happened.

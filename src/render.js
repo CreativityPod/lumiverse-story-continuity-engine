@@ -1,3 +1,5 @@
+import { formatStoryClockValue } from "./clock.js";
+
 // Prompt-only presentation. Canonical state and the tracker protocol stay JSON.
 export const APPEARANCE_LABELS = { face: "FACE", eyes: "EYES", skin: "SKIN", body: "BODY TYPE & PROPORTIONS", distinguishingFeatures: "DISTINGUISHING FEATURES" };
 export const VISIBLE_LABELS = { hairAndGrooming: "HAIR & GROOMING", dressAndLayers: "DRESS & LAYERS", physicalState: "PHYSICAL STATE", position: "POSITION", activity: "ACTIVITY", items: "ITEMS" };
@@ -11,7 +13,7 @@ const promptFields = (record, labels) => Object.entries(labels).filter(([key]) =
 export function renderContinuityContext(context, { visualOnly = false } = {}) {
   const world = context.world ?? {}, characters = context.characters ?? [], places = context.places ?? [];
   const lines = ["CURRENT SCENE"];
-  const when = [world.date, world.time].filter(hasPromptValue).map(promptValue).join("; ");
+  const when = ["date", "time"].filter(key => hasPromptValue(world[key])).map(key => promptValue(formatStoryClockValue(key, world[key]))).join("; ");
   if (when) lines.push(`WHEN: ${when}`);
   for (const [key, label] of Object.entries({ sceneStatus: "LIFECYCLE", weather: "WEATHER", location: "LOCATION", immediateContext: "CONTEXT", proximityAndContact: "PROXIMITY & CONTACT" })) {
     if (hasPromptValue(world[key])) lines.push(`${label}: ${promptValue(world[key])}`);

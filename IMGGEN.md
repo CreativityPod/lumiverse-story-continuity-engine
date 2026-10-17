@@ -1,5 +1,7 @@
 # Image generation with Story Continuity
 
+The `WHEN` line uses readable dates without Gregorian years and AM/PM times, for example `October 17 (Fall); 02:54 PM (Afternoon)`. Seasonal descriptions come from established scene facts; clock-period labels alone do not establish sunlight or weather.
+
 Use this macro in Lumiverse ImageGen's **Chat-aware Custom** Main preset:
 
 ```text

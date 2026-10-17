@@ -1,3 +1,5 @@
+import { formatStoryClockValue } from "./clock.js";
+
 const STORY_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H4z"/><path d="M20 4h-4a3 3 0 0 0-3 3v14a4 4 0 0 1 4-3h3z"/><path d="M7 8h3M7 12h3M16 8h1M16 12h1"/></svg>';
 const STORY_WIDGET_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 64 64" fill="none" aria-hidden="true" focusable="false">
   <defs>
@@ -304,7 +306,7 @@ export function setup(ctx) {
       }
       snapshotContent.append(root);
     };
-    record("World and current scene", snapshot.world);
+    record("World and current scene", { ...snapshot.world, date: formatStoryClockValue("date", snapshot.world.date), time: formatStoryClockValue("time", snapshot.world.time) });
     for (const char of snapshot.characters ?? []) record(`${char.name} · ${char.role === "npc" ? "NPC" : char.role === "user" ? "User character" : "Main character"}`, { ...char.appearance, ...char.visible });
     const names = new Map((snapshot.characters ?? []).map(char => [char.id, char.name]));
     for (const rel of snapshot.relationships ?? []) record(`${names.get(rel.fromId) ?? rel.fromId} → ${names.get(rel.toId) ?? rel.toId}`, { Relationship: rel.publicStatus });

@@ -64,6 +64,20 @@ for (const native of [false, true]) test(`drawer ${native ? "native" : "fallback
   } finally { h.restore(); }
   if (native) assert.equal(h.destroyed.length, h.mounts.length);
 });
+test("drawer dates omit years and exact times show AM/PM with narrative descriptions", () => {
+  const h = mountHarness();
+  try {
+    const snapshot = publicTrackerSnapshot(fixtureState());
+    Object.assign(snapshot.world, { date: "2031-10-17 (Fall)", time: "14:54" });
+    h.status({ snapshot });
+    const world = [...document.querySelectorAll(".sce-record")].find(record => record.querySelector("h4").textContent === "World and current scene");
+    assert.ok(world.textContent.includes("October 17 (Fall)")); assert.ok(world.textContent.includes("02:54 PM (Afternoon)"));
+    assert.ok(!world.textContent.includes("2031")); assert.equal(snapshot.world.time, "14:54");
+    Object.assign(snapshot.world, { date: "Fall", time: "Late afternoon" }); h.status({ snapshot });
+    assert.ok(document.body.textContent.includes("Fall")); assert.ok(document.body.textContent.includes("Late afternoon"));
+  } finally { h.restore(); }
+});
+
 test("drawer preserves unsaved settings and sends one concrete settings payload", () => {
   const h = mountHarness();
   try {

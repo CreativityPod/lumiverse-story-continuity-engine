@@ -60,9 +60,10 @@ test("roleplay snapshot is bounded, flags omitted facts and never truncates or r
 });
 test("labeled context preserves observable facts and keeps character secrets in explicit private sections", () => {
   const state = fixtureState(), before = structuredClone(state);
-  state.world.date = "2031-06-12"; state.world.time = "21:30";
+  state.world.date = "2031-06-12 (Summer)"; state.world.time = "21:30 (After dinner)";
   const text = renderContinuityContext(buildRoleplayContext(state, "", { sources: SOURCES }));
-  assert.match(text, /CURRENT SCENE\nWHEN: 2031-06-12; 21:30/);
+  assert.match(text, /CURRENT SCENE\nWHEN: June 12 \(Summer\); 09:30 PM \(After dinner\)/);
+  assert.equal(state.world.date, "2031-06-12 (Summer)"); assert.equal(state.world.time, "21:30 (After dinner)");
   assert.match(text, /CHARACTER c1: Ada/);
   assert.match(text, /STABLE APPEARANCE: FACE: Angular; EYES: Brown/);
   assert.match(text, /CURRENT VISIBLE: HAIR & GROOMING: Black hair; DRESS & LAYERS: Blue coat/);

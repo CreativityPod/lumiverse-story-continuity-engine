@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
+import { formatStoryClockValue } from "../src/clock.js";
 import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns, fingerprint } from "../src/state.js";
 import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState, modelOutput } from "./fixtures.js";
@@ -137,7 +138,7 @@ test("programmatic world defaults survive restart, reprocess and portable setup 
   await h.select(); assert.equal(h.requests.length, 1);
   const store = await h.engine.loadStore("chat"), values = store.initialWorldDefaults.values;
   for (const field of ["date", "time", "weather"]) assert.equal(store.current.world[field], values[field]);
-  assert.ok(h.variables.get(`chat:${CHAT_KEYS.visual}`).includes(values.date));
+  assert.ok(h.variables.get(`chat:${CHAT_KEYS.visual}`).includes(formatStoryClockValue("date", values.date)));
   const restarted = createStoryEngine(h.api);
   await restarted.schedule("chat", { reprocess: true }, "owner"); assert.equal(h.requests.length, 1);
   for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], values[field]);
@@ -424,7 +425,7 @@ test("card setup preserves the opening, saves private/public mirrors and recheck
   assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes("Lantern Guild"));
   assert.ok(!h.variables.get(`chat:${CHAT_KEYS.public}`).includes("Lantern Guild"));
   const visual = h.variables.get(`chat:${CHAT_KEYS.visual}`);
-  assert.match(visual, /CURRENT SCENE\nWHEN: October 13; 00:00/);
+  assert.match(visual, /CURRENT SCENE\nWHEN: October 13; 12:00 AM \(Midnight\)/);
   assert.match(visual, /STABLE APPEARANCE: FACE: Angular; EYES: Brown/);
   assert.match(visual, /DRESS & LAYERS: Blue coat/);
   for (const secret of ["Lantern Guild", "Hidden tunnel", "Knows the signal is faulty", "Repair the signal", "sourceMessageId"]) assert.ok(!visual.includes(secret));
@@ -445,25 +446,25 @@ test("story clock updates and visual macros follow committed turns without extra
     assert.match(request.messages[0].content, /midnight, month and year rollovers/);
     assert.match(request.messages[0].content, /Observation, analysis and real waiting do not advance time/);
     const proposed = modelOutput(undefined, { initialize: true });
-    Object.assign(proposed.world, { date: "2031-12-31", time: "11:50 pm" });
+    Object.assign(proposed.world, { date: "2031-12-31 (Winter)", time: "11:50 pm (Late night)" });
     return { content: JSON.stringify(proposed) };
   });
   await h.select(); assert.equal(h.requests.length, 1);
-  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /WHEN: 2031-12-31; 23:50/);
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /WHEN: December 31 \(Winter\); 11:50 PM \(Late night\)/);
   h.addTurn("Twenty minutes later, Ada removes her coat.");
   h.setResponse(async request => {
-    assert.ok(request.messages[1].content.includes('"date":"2031-12-31"'));
-    assert.ok(request.messages[1].content.includes('"time":"23:50"'));
-    return { content: JSON.stringify({ schemaVersion: 2, world: { action: "update", changes: [{ field: "date", value: "2032-1-1" }, { field: "time", value: "12:10 am" }] },
+    assert.ok(request.messages[1].content.includes('"date":"2031-12-31 (Winter)"'));
+    assert.ok(request.messages[1].content.includes('"time":"23:50 (Late night)"'));
+    return { content: JSON.stringify({ schemaVersion: 2, world: { action: "update", changes: [{ field: "date", value: "2032-1-1 (Winter)" }, { field: "time", value: "12:10 am" }] },
       characters: [{ id: "c1", action: "update", changes: [{ field: "visible.dressAndLayers", value: "White shirt; coat on bench" }] }], relationships: [], places: [], objectives: [] }) };
   });
   await h.engine.schedule("chat", {}, "owner");
   const current = (await h.engine.loadStore("chat")).current;
-  assert.equal(current.world.date, "2032-01-01"); assert.equal(current.world.time, "00:10");
-  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /WHEN: 2032-01-01; 00:10/);
+  assert.equal(current.world.date, "2032-01-01 (Winter)"); assert.equal(current.world.time, "00:10");
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /WHEN: January 1 \(Winter\); 12:10 AM \(Late night\)/);
   assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /DRESS & LAYERS: White shirt; coat on bench/);
   const prompt = await h.engine.intercept([{ role: "user", content: "Continue" }], { chatId: "chat", userId: "owner" });
-  assert.match(prompt.messages[0].content, /WHEN: 2032-01-01; 00:10/);
+  assert.match(prompt.messages[0].content, /WHEN: January 1 \(Winter\); 12:10 AM \(Late night\)/);
   assert.equal(h.requests.length, 2);
 });
 
