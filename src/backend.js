@@ -4,6 +4,7 @@ import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializat
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
 import { DEFAULT_CONFIG, normalizeConfig, runTracker, recoverSetupPreview } from "./tracker.js";
 import { TRACKER_CONTRACT_VERSION } from "./protocol.js";
+import { buildVisualContext } from "./context.js";
 
 export function createStoryEngine(api) {
   const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map();
@@ -78,7 +79,8 @@ export function createStoryEngine(api) {
     if (!has("chat_mutation") || deleted.has(store.chatId)) return;
     for (const [key, value] of [[CHAT_KEYS.state, store.current && !store.blocked ? JSON.stringify(store.current) : ""],
       [CHAT_KEYS.legacyState, store.current && !store.blocked ? JSON.stringify(legacyTrackerState(store.current)) : ""],
-      [CHAT_KEYS.public, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current)) : ""]]) {
+      [CHAT_KEYS.public, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current)) : ""],
+      [CHAT_KEYS.visual, store.current && !store.blocked ? buildVisualContext(store.current, { sources: store.sources }) : ""]]) {
       if (!api.variables.chat.get || await api.variables.chat.get(store.chatId, key) !== value) await api.variables.chat.set(store.chatId, key, value);
     }
   }

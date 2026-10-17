@@ -230,7 +230,7 @@ test("world-only repair retains initial profiles AND valid date/time/weather in 
     const previews = [];
     const next = await runTracker(h.api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline", onSetupPreview: preview => previews.push(preview) }, {});
     assert.equal(h.requests.length, 2); assert.equal(next.world.sceneStatus, "active"); assert.equal(next.world.date, "October 13");
-    assert.equal(next.world.time, "Midnight"); assert.equal(next.world.weather, "Rain"); assert.equal(next.characters[0].profile.identity, "Mechanic");
+    assert.equal(next.world.time, "00:00"); assert.equal(next.world.weather, "Rain"); assert.equal(next.characters[0].profile.identity, "Mechanic");
     assert.equal(next.characters[0].visible.dressAndLayers, "Blue coat");
     assert.equal(previews.length, 1); assert.deepEqual(previews[0].unavailableFields, ["world.sceneStatus"]);
     assert.match(h.requests[1].messages.at(-1).content, /expected "active" or "ended"/);
@@ -254,6 +254,19 @@ test("repairing another malformed world field also retains the remaining valid s
   const next = await runTracker(h.api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline" }, {});
   assert.equal(h.requests.length, 2); assert.equal(next.world.date, "October 13"); assert.equal(next.world.weather, "Rain");
   assert.equal(next.characters[0].visible.dressAndLayers, "Blue coat");
+});
+
+test("invalid exact story clocks use the existing field repair without losing other setup facts", async () => {
+  for (const [field, invalid, corrected] of [["date", "2031-02-29", "2032-02-29"], ["time", "25:10", "1:10 pm"]]) {
+    const rejected = initialOutput("active"); rejected.world.changes.find(change => change.field === field).value = invalid;
+    const h = mock([{ content: JSON.stringify(rejected) }, { content: JSON.stringify(output({ world: patch(null, [[field, corrected]]) })) }]);
+    const next = await runTracker(h.api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline" }, {});
+    assert.equal(h.requests.length, 2);
+    assert.equal(next.world[field], field === "date" ? "2032-02-29" : "13:10");
+    assert.equal(next.world.weather, "Rain"); assert.equal(next.characters[0].profile.identity, "Mechanic");
+    assert.equal(next.characters[0].visible.dressAndLayers, "Blue coat");
+    assert.ok(h.requests[1].messages.at(-1).content.includes(`world.${field}`));
+  }
 });
 
 test("preview recovery excludes invalid user thoughts and never invents profiles from incomplete JSON", () => {

@@ -1,3 +1,11 @@
+# 1.6.0
+
+- Render selected roleplay continuity as labeled scene, appearance/clothing, private character context, relationships, commitments and place sections. Keep canonical/tracker JSON and persistent identities unchanged; retain aliases and whole-value omission under a 24,000-character rendered-text budget.
+- Prioritize scene context, physical continuity, knowledge, boundaries and commitments before long biographies. Omission continues to preserve established facts.
+- Add `story_continuity.visual_text_v1`, an observable-only labeled mirror for ImageGen, and ready-to-paste parser instructions in `IMGGEN.md`. Preserve existing JSON macro formats; document the separate-parser freshness limitation.
+- Standardize newly proposed exact fictional clock values, validate calendar/time ranges through the existing repair path, preserve approximate/fictional-calendar values and unchanged clock provenance, and strengthen elapsed-time, midnight/month/year rollover and deadline instructions. Existing/imported clocks are not backfilled.
+- Add prompt budget, label/visual privacy, macro freshness, clock normalization, provenance and repair regressions. Increase the internal tracker contract to release old rejection pauses without replaying valid checkpoints.
+
 # 1.5.4
 
 - Fix the v1.5.3 compact-schema regression that constrained change-field names but lost enum constraints on their values. Scene/objective statuses and character roles/controllers now have field-specific value choices. Instructions and errors identify valid status values; casing and an unknown scene-status claim normalize conservatively.

@@ -292,7 +292,7 @@ test("cleanup rechecks chat existence and deleted chats cannot recreate tracking
 test("damaged saved state rebuilds and an edited import anchor cannot export stale imported state", async () => {
   const h = harness(); await h.select();
   h.files.get(h.engine.pathFor("chat")).current.world.time = 5;
-  await h.engine.schedule("chat", {}, "owner"); assert.equal(h.requests.length, 2); assert.equal((await h.engine.loadStore("chat")).current.world.time, "Midnight");
+  await h.engine.schedule("chat", {}, "owner"); assert.equal(h.requests.length, 2); assert.equal((await h.engine.loadStore("chat")).current.world.time, "00:00");
   const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(fixtureState(), new Map(), "initial-setup") };
   await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup), requestId: "import" }, "owner");
   h.messages.get("chat").at(-1).content = "Edited confirmation";
@@ -342,7 +342,7 @@ test("GUID-backed saves inject only aliases and rejected alias typos cannot comm
   await h.select();
   const initial = await h.engine.loadStore("chat"); assert.equal(initial.current.characters[0].id, `char:${guid}`);
   const injection = await h.engine.intercept([{ role: "user", content: "Continue" }], { chatId: "chat", userId: "owner" });
-  assert.ok(injection.messages[0].content.includes('"id":"c1"')); assert.ok(!injection.messages[0].content.includes(guid));
+  assert.ok(injection.messages[0].content.includes('CHARACTER c1: Ada')); assert.ok(!injection.messages[0].content.includes(guid));
   assert.ok(!h.requests[0].messages.map(message => message.content).join("\n").includes(guid));
   h.addTurn("Ada removes the coat.");
   h.setResponse(async () => {
@@ -374,6 +374,11 @@ test("card setup preserves the opening, saves private/public mirrors and recheck
   assert.equal(store.current.characters[0].visible.dressAndLayers, "Blue coat");
   assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes("Lantern Guild"));
   assert.ok(!h.variables.get(`chat:${CHAT_KEYS.public}`).includes("Lantern Guild"));
+  const visual = h.variables.get(`chat:${CHAT_KEYS.visual}`);
+  assert.match(visual, /CURRENT SCENE\nWHEN: October 13; 00:00/);
+  assert.match(visual, /STABLE APPEARANCE: FACE: Angular; EYES: Brown/);
+  assert.match(visual, /DRESS & LAYERS: Blue coat/);
+  for (const secret of ["Lantern Guild", "Hidden tunnel", "Knows the signal is faulty", "Repair the signal", "sourceMessageId"]) assert.ok(!visual.includes(secret));
   assert.equal((await h.engine.status("chat", "owner")).canImport, true);
   await h.engine.schedule("chat", {}, "owner");
   const rechecked = await h.engine.loadStore("chat");
@@ -381,6 +386,36 @@ test("card setup preserves the opening, saves private/public mirrors and recheck
   h.setResponse(null); h.addTurn("Ada nods."); await h.engine.schedule("chat", {}, "owner");
   assert.equal(h.requests.length, 2);
   assert.equal(listEligibleTurns(h.messages.get("chat")).length, 2);
+});
+
+test("story clock updates and visual macros follow committed turns without extra generation", async () => {
+  const h = harness();
+  h.setResponse(async request => {
+    assert.match(request.messages[0].content, /YYYY-MM-DD/);
+    assert.match(request.messages[0].content, /24-hour HH:mm/);
+    assert.match(request.messages[0].content, /midnight, month and year rollovers/);
+    assert.match(request.messages[0].content, /Observation, analysis and real waiting do not advance time/);
+    const proposed = modelOutput(undefined, { initialize: true });
+    Object.assign(proposed.world, { date: "2031-12-31", time: "11:50 pm" });
+    return { content: JSON.stringify(proposed) };
+  });
+  await h.select(); assert.equal(h.requests.length, 1);
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /WHEN: 2031-12-31; 23:50/);
+  h.addTurn("Twenty minutes later, Ada removes her coat.");
+  h.setResponse(async request => {
+    assert.ok(request.messages[1].content.includes('"date":"2031-12-31"'));
+    assert.ok(request.messages[1].content.includes('"time":"23:50"'));
+    return { content: JSON.stringify({ schemaVersion: 2, world: { action: "update", changes: [{ field: "date", value: "2032-1-1" }, { field: "time", value: "12:10 am" }] },
+      characters: [{ id: "c1", action: "update", changes: [{ field: "visible.dressAndLayers", value: "White shirt; coat on bench" }] }], relationships: [], places: [], objectives: [] }) };
+  });
+  await h.engine.schedule("chat", {}, "owner");
+  const current = (await h.engine.loadStore("chat")).current;
+  assert.equal(current.world.date, "2032-01-01"); assert.equal(current.world.time, "00:10");
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /WHEN: 2032-01-01; 00:10/);
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /DRESS & LAYERS: White shirt; coat on bench/);
+  const prompt = await h.engine.intercept([{ role: "user", content: "Continue" }], { chatId: "chat", userId: "owner" });
+  assert.match(prompt.messages[0].content, /WHEN: 2032-01-01; 00:10/);
+  assert.equal(h.requests.length, 2);
 });
 
 test("failed initialization keeps the opening target available for retry without posting diagnostics", async () => {

@@ -1,6 +1,7 @@
 import { TRACKER_OUTPUT_JSON_SCHEMA } from "./schemas.js";
+import { normalizeStoryClockValue } from "./clock.js";
 
-export const TRACKER_CONTRACT_VERSION = 3;
+export const TRACKER_CONTRACT_VERSION = 4;
 export const TRACKER_COLLECTIONS = ["characters", "relationships", "places", "objectives"];
 
 export class TrackerValidationError extends Error {
@@ -59,6 +60,13 @@ export function expandTrackerRecord(candidate, kind, prior, identity = {}) {
   const result = prior ? structuredClone(prior) : { ...defaults(schema), ...identity };
   result.action = candidate.action ?? "update";
   const normalizeChoice = (value, field, path, saved) => {
+    if (kind === "world" && ["date", "time"].includes(path)) {
+      if (value === saved) return saved;
+      const normalized = normalizeStoryClockValue(path, value);
+      // Equivalent clock spellings are not story events and must retain provenance.
+      try { if (normalized === normalizeStoryClockValue(path, saved)) return saved; } catch { /* A supported correction may replace an old invalid value. */ }
+      return normalized;
+    }
     if (!field.enum || typeof value !== "string") return value;
     const clean = value.trim().toLowerCase(), match = field.enum.find(choice => choice.toLowerCase() === clean);
     if (match) return match;

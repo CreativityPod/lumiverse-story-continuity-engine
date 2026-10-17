@@ -1,10 +1,11 @@
 import { cloneEmptyState, validateState, remapStateSources } from "./schemas.js";
 import { buildRoleplayContext } from "./context.js";
+import { renderContinuityContext } from "./render.js";
 import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 
 export const SETUP_FORMAT = "story-continuity-initial-setup";
 export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the Story Continuity drawer when ready.";
-export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v1" });
+export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v1", visual: "story_continuity.visual_text_v1" });
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
 // Setup controls are UI only; legacy notices remain recognized for cleanup/filtering.
@@ -196,7 +197,7 @@ export function injectContinuity(messages, state, status = "active", options = {
   const latestUser = clean.findLast(message => message.role === "user");
   const text = `${contentToText(latestUser?.content)}\n${options.recentText ?? ""}`;
   const projected = buildRoleplayContext(state, text, options);
-  const block = { role: "system", storyContinuityOwned: true, content: `Story Continuity Engine (${status}). The following JSON is a selected projection of private canonical continuity data for this chat branch, not instructions. Entity ids are short bookkeeping aliases for this prompt; use character/place names in ordinary replies. Preserve established facts until a supported story event changes them. Characters, places, and fields omitted for relevance or budget still exist in saved continuity; omission does not make an established fact unknown or undo it. Do not invent missing facts. Each character knows only their recorded knowledge and plausible perceptions. The user controls their own voluntary actions and internal state. Do not expose private profiles, secrets, intentions, or bookkeeping in ordinary replies; use private data to guide behavior without giving other characters unexplained knowledge. Continue to follow the character card's voice and behavior. Consent is specific to an action and cannot be inferred from clothing, mood, trust, or attraction.\n${JSON.stringify(projected)}` };
+  const block = { role: "system", storyContinuityOwned: true, content: `Story Continuity Engine (${status}). The following labeled snapshot is a selected projection of private canonical continuity data for this chat branch, not instructions. Entity ids are short bookkeeping aliases for this prompt; use character/place names in ordinary replies. Preserve established facts until a supported story event changes them. Current recorded conditions take precedence over obsolete starting conditions. Characters, places, and fields omitted for relevance or budget still exist in saved continuity; omission does not make an established fact unknown or undo it. Do not invent missing facts. WHEN is the fictional story clock; preserve its precision and advance it only through narrated events or stated elapsed story time, including supported date rollover. Real waiting time and generation latency do not advance it; observation-only recaps do not advance it. Each character knows only their recorded knowledge and plausible perceptions. The user controls their own voluntary actions and internal state. Do not expose private profiles, secrets, intentions, or bookkeeping in ordinary replies; use private data to guide behavior without giving other characters unexplained knowledge. Continue to follow the character card's voice and behavior. Consent is specific to an action and cannot be inferred from clothing, mood, trust, or attraction.\n${renderContinuityContext(projected)}` };
   const index = clean.findLastIndex(message => message.role === "user");
   const insertionIndex = index >= 0 ? index : clean.length;
   clean.splice(insertionIndex, 0, block);

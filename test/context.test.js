@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectRelevantState, buildRoleplayContext, lookupSourceReferences, buildRoutineTrackerContext, SOURCE_REFERENCE_CHARS, ROLEPLAY_CONTEXT_CHARS } from "../src/context.js";
+import { selectRelevantState, buildRoleplayContext, buildVisualContext, lookupSourceReferences, buildRoutineTrackerContext, SOURCE_REFERENCE_CHARS, ROLEPLAY_CONTEXT_CHARS } from "../src/context.js";
+import { renderContinuityContext } from "../src/render.js";
 import { fixtureState, character, SOURCES } from "./fixtures.js";
 import { materializeTrackerOutput, trackerStateForLlm } from "../src/schemas.js";
 
@@ -52,10 +53,43 @@ test("roleplay snapshot is bounded, flags omitted facts and never truncates or r
   const state = extendedState();
   for (const section of [state.characters[0].profile, state.characters[0].appearance, state.characters[0].visible, state.characters[0].internal]) for (const key of Object.keys(section)) section[key] = key.repeat(Math.floor(1500 / key.length));
   const before = JSON.stringify(state), projection = buildRoleplayContext(state, "Continue", { maxChars: 5000 });
-  assert.ok(JSON.stringify(projection).length <= 5000); assert.equal(projection.projection.omittedFields, true); assert.equal(projection.projection.omittedCharacters, 1);
+  assert.ok(renderContinuityContext(projection).length <= 5000); assert.equal(projection.projection.omittedFields, true); assert.equal(projection.projection.omittedCharacters, 1);
   assert.equal(JSON.stringify(state), before);
   for (const section of ["profile", "appearance", "visible", "internal"]) for (const [key, value] of Object.entries(projection.characters[0][section] ?? {})) assert.equal(value, state.characters[0][section][key]);
-  assert.ok(JSON.stringify(buildRoleplayContext(state)).length <= ROLEPLAY_CONTEXT_CHARS);
+  assert.ok(renderContinuityContext(buildRoleplayContext(state)).length <= ROLEPLAY_CONTEXT_CHARS);
+});
+test("labeled context preserves observable facts and keeps character secrets in explicit private sections", () => {
+  const state = fixtureState(), before = structuredClone(state);
+  state.world.date = "2031-06-12"; state.world.time = "21:30";
+  const text = renderContinuityContext(buildRoleplayContext(state, "", { sources: SOURCES }));
+  assert.match(text, /CURRENT SCENE\nWHEN: 2031-06-12; 21:30/);
+  assert.match(text, /CHARACTER c1: Ada/);
+  assert.match(text, /STABLE APPEARANCE: FACE: Angular; EYES: Brown/);
+  assert.match(text, /CURRENT VISIBLE: HAIR & GROOMING: Black hair; DRESS & LAYERS: Blue coat/);
+  const [visible, privateText] = text.split("PRIVATE CHARACTER CONTEXT");
+  assert.ok(!visible.includes("Lantern Guild")); assert.ok(!visible.includes("Hidden tunnel"));
+  assert.match(privateText, /Lantern Guild affiliation/); assert.match(privateText, /KNOWLEDGE: Knows the signal is faulty/);
+  assert.ok(!text.includes("sourceMessageId")); assert.ok(!text.includes("char:ada")); assert.ok(!text.includes("Unknown"));
+  assert.deepEqual(state.characters, before.characters); assert.deepEqual(state.places, before.places);
+});
+test("scene context, knowledge, boundaries and commitments survive budget pressure before biography", () => {
+  const state = fixtureState(); state.world.immediateContext = "Last train departs soon";
+  state.characters[0].profile.boundaries = "Keep the locker closed";
+  state.characters[0].profile.background = "LONG_BIOGRAPHY ".repeat(100);
+  state.objectives.push({ id: "objective:train", ownerId: "char:ada", objective: "Board the last train", timing: "2031-06-12 22:00", status: "active", sourceMessageId: "card-baseline" });
+  const context = buildRoleplayContext(state, "", { maxChars: 1800 }), text = renderContinuityContext(context);
+  for (const fact of ["Last train departs soon", "Keep the locker closed", "Knows the signal is faulty", "Board the last train", "2031-06-12 22:00"]) assert.ok(text.includes(fact), fact);
+  assert.ok(!text.includes("LONG_BIOGRAPHY")); assert.ok(text.length <= 1800);
+  assert.match(text, /Omission does not erase established facts/);
+});
+test("visual text has stable image labels and excludes every private category and absent cast", () => {
+  const state = extendedState(), before = JSON.stringify(state);
+  const text = buildVisualContext(state, { sources: SOURCES });
+  for (const value of ["FACE: Angular", "EYES: Brown", "HAIR & GROOMING: Black hair", "DRESS & LAYERS: Blue coat", "POSITION: Platform", "ITEMS: Toolbag"]) assert.ok(text.includes(value), value);
+  for (const value of ["Lantern Guild", "Hidden tunnel", "Repair the signal", "Wary", "REMOTE_SECRET", "REMOTE_PLACE_SECRET", "Mira", "PRIVATE CHARACTER CONTEXT", "sourceMessageId", "char:ada"]) assert.ok(!text.includes(value), value);
+  assert.equal(JSON.stringify(state), before);
+  const known = fixtureState(); known.characters[0].visible.items = "No weapons"; known.characters[0].appearance.skin = " unknown ";
+  const rendered = buildVisualContext(known); assert.match(rendered, /ITEMS: No weapons/); assert.doesNotMatch(rendered, /SKIN:/);
 });
 test("targeted references retrieve an omitted allergy without resending guidance, examples or the opening", () => {
   const sources = structuredClone(SOURCES);
