@@ -1,4 +1,4 @@
-import { normalizePartialUpdate } from "./partial.js";
+import { normalizePartialUpdate, normalizeAcceptedUpdates } from "./partial.js";
 import { cloneEmptyState, validateState, remapStateSources } from "./schemas.js";
 import { buildRoleplayContext } from "./context.js";
 import { renderContinuityContext } from "./render.js";
@@ -170,7 +170,8 @@ export function validCheckpointPrefix(store, turns) {
     try {
       previousState = validateState(checkpoint.state, { allowedSourceMessageIds: ["card-baseline", ...(store.epoch.startsWith("import:") ? [store.epoch.slice(7)] : []), ...turns.slice(0, count + 1).map(item => String(item.assistant.id))] });
     } catch { break; }
-    checkpoints[turn.key] = { ...checkpoint, state: previousState, partial: normalizePartialUpdate(checkpoint.partial) };
+    checkpoints[turn.key] = { ...checkpoint, state: previousState, partial: normalizePartialUpdate(checkpoint.partial),
+      acceptedUpdates: normalizeAcceptedUpdates(checkpoint.acceptedUpdates) };
     count++;
   }
   return { previousState, count, checkpoints };

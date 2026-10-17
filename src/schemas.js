@@ -1,5 +1,6 @@
 export const TRACKER_SCHEMA_VERSION = 3;
 export const MAX_STATE_CHARS = 64000;
+export const TRACKER_TEXT_LIMITS = Object.freeze({ text: 1600, name: 160, id: 180 });
 export const UNKNOWN = "Unknown";
 const stringSchema = () => ({ type: "string" });
 const enumSchema = values => ({ type: "string", enum: values });
@@ -76,8 +77,10 @@ function validateNode(value, schema, path) {
   }
   if (typeof value !== "string") throw invalid(`${path} must be text`, "invalid_type");
   const clean = value.replace(/\r\n?/g, "\n").trim();
-  const limit = /\.(id|fromId|toId|ownerId|sourceMessageId)$/.test(path) ? 180 : /\.name$/.test(path) ? 160 : 1600;
-  if (!clean || clean.length > limit || /<!--|-->|<\/?story_continuity/i.test(clean)) throw invalid(`${path} contains invalid text`, "invalid_text");
+  const limit = /\.(id|fromId|toId|ownerId|sourceMessageId)$/.test(path) ? TRACKER_TEXT_LIMITS.id : /\.name$/.test(path) ? TRACKER_TEXT_LIMITS.name : TRACKER_TEXT_LIMITS.text;
+  if (!clean) throw invalid(`${path} contains invalid text: empty after trimming; provide nonempty text or Unknown for an unsupported fact`, "invalid_text");
+  if (clean.length > limit) throw invalid(`${path} contains invalid text: ${clean.length} characters exceeds the ${limit}-character limit; return at most ${limit} characters`, "invalid_text");
+  if (/<!--|-->|<\/?story_continuity/i.test(clean)) throw invalid(`${path} contains invalid text: reserved HTML comment or story_continuity markup; return plain text without these markers`, "invalid_text");
   if (schema.enum && !schema.enum.includes(clean)) throw Object.assign(new Error(`${path} contains an invalid choice ${JSON.stringify(clean)}; expected ${schema.enum.map(choice => JSON.stringify(choice)).join(" or ")}`),
     { path, code: "invalid_choice", allowedValues: schema.enum });
   return clean;

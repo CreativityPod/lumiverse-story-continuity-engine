@@ -438,6 +438,72 @@ test("optional setup failures save profiles while malformed retry cannot remove 
   assert.equal(fixed.initialSetup.state.relationships[0].privateState, "Cautious trust");
 });
 
+test("later valid relationship replacements clear deduplicated warnings across restarts while rewinds and forks retain their own history", async () => {
+  const h = harness(), initial = fixtureState(), mira = structuredClone(initial.characters[0]);
+  Object.assign(mira, { id: "npc:mira", role: "npc", name: "Mira" }); initial.characters.push(mira);
+  initial.relationships.push({ id: "rel:mira", fromId: "char:ada", toId: mira.id, publicStatus: "Colleagues", privateState: "Cautious trust", boundaryOrConcern: "Unknown", sourceMessageId: "card-baseline" });
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput(initial, { initialize: true })) })); await h.select();
+  const response = (field, value) => ({ schemaVersion: 3, world: { action: "preserve", changes: [] }, characters: [],
+    relationships: [{ id: "r1", action: "update", changes: [{ field, value }] }], places: [], objectives: [] });
+  h.setResponse(async () => ({ content: JSON.stringify(response("privateState", "")) }));
+  for (const id of ["a1", "a2"]) { h.addTurn(`Ada and Mira discuss the signal, ${id}.`, id); await h.engine.schedule("chat", {}, "owner"); }
+  let status = await h.engine.status("chat", "owner"); assert.equal(status.partialUpdateCount, 1); assert.equal(status.partialUpdates[0].sourceMessageId, "a2");
+  h.setResponse(async () => ({ content: JSON.stringify(response("publicStatus", "Friends")) }));
+  h.addTurn("Ada and Mira are publicly recognized as friends.", "a3"); await h.engine.schedule("chat", {}, "owner");
+  assert.equal((await h.engine.status("chat", "owner")).code, "partial");
+  h.setResponse(async request => {
+    assert.match(request.messages[1].content, /PENDING TRACKING FIELDS/);
+    return { content: JSON.stringify(response("privateState", "Cautious trust")) };
+  });
+  h.addTurn("Ada confirms her cautious trust in Mira.", "a4"); await h.engine.schedule("chat", {}, "owner");
+  const saved = await h.engine.loadStore("chat"); assert.equal(saved.current.relationships[0].privateState, "Cautious trust");
+  assert.ok(saved.checkpoints["a1::0"].partial); assert.ok(saved.checkpoints["a2::0"].partial);
+  assert.equal((await h.engine.status("chat", "owner")).partialUpdateCount, 0);
+  const count = h.requests.length, restarted = createStoryEngine(h.api);
+  await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
+  assert.equal((await restarted.status("chat", "owner")).code, "active"); assert.equal(h.requests.length, count);
+  const prefix = h.messages.get("chat").slice(0, h.messages.get("chat").findIndex(message => message.id === "a2") + 1);
+  const map = Object.fromEntries(prefix.map(message => [message.id, `fork-${message.id}`]));
+  h.messages.set("fork", prefix.map(message => ({ ...structuredClone(message), id: map[message.id] }))); h.chats.set("fork", { id: "fork", character_id: "ada" });
+  await restarted.inheritFork({ sourceChatId: "chat", forkedChatId: "fork", forkedAtMessageId: "a2", messageIdMap: map }, "owner");
+  assert.equal((await restarted.status("fork", "owner")).partialUpdateCount, 1);
+  h.messages.set("chat", prefix); await restarted.schedule("chat", {}, "owner");
+  assert.equal((await restarted.status("chat", "owner")).partialUpdateCount, 1); assert.equal(h.requests.length, count);
+  h.setResponse(async request => {
+    assert.match(request.messages[1].content, /RETRY INCOMPLETE/); assert.match(request.messages[1].content, /signal, a2/);
+    return { content: JSON.stringify(response("privateState", "Cautious trust")) };
+  });
+  await restarted.handleFrontend({ type: "story_retry_partial", chatId: "chat" }, "owner");
+  assert.equal(h.requests.length, count + 1); assert.equal((await restarted.status("chat", "owner")).code, "active");
+});
+
+test("shortened summaries show a warning until a later complete replacement and preserve accepted facts", async () => {
+  const h = harness(), initial = fixtureState(), mira = structuredClone(initial.characters[0]);
+  Object.assign(mira, { id: "npc:mira", role: "npc", name: "Mira" }); initial.characters.push(mira);
+  initial.relationships.push({ id: "rel:mira", fromId: "char:ada", toId: mira.id, publicStatus: "Colleagues", privateState: "Cautious trust", boundaryOrConcern: "Keep guild matters private", sourceMessageId: "card-baseline" });
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput(initial, { initialize: true })) })); await h.select();
+  const recap = "Earlier tasks and every completed step were discussed. ".repeat(50).slice(0, 2190);
+  const proposed = { schemaVersion: 3, world: { action: "update", changes: [{ field: "immediateContext", value: recap }] },
+    characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "Early thirties" }] }],
+    relationships: [{ id: "r1", action: "update", changes: [{ field: "privateState", value: recap }] }], places: [], objectives: [] };
+  h.setResponse(async () => ({ content: JSON.stringify(proposed) })); h.addTurn("Ada and Mira discuss their collaboration."); await h.engine.schedule("chat", {}, "owner");
+  const saved = await h.engine.loadStore("chat"), status = await h.engine.status("chat", "owner");
+  assert.equal(saved.current.characters[0].profile.age, "Early thirties"); assert.equal(saved.current.relationships[0].boundaryOrConcern, "Keep guild matters private");
+  assert.ok(saved.current.relationships[0].privateState.length <= 1600); assert.ok(saved.current.world.immediateContext.length <= 1600);
+  assert.equal(status.code, "partial"); assert.equal(status.partialUpdates[0].components.length, 2);
+  assert.ok(status.partialUpdates[0].components.every(component => component.shortened && component.originalLength === 2190));
+  assert.ok(!JSON.stringify(status.partialUpdates).includes("Earlier tasks"));
+  const count = h.requests.length, restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, count); assert.equal((await restarted.status("chat", "owner")).code, "partial");
+  const corrected = structuredClone(proposed); corrected.characters = [];
+  corrected.world.changes[0].value = "Ada and Mira are discussing the signal repair on the platform.";
+  corrected.relationships[0].changes[0].value = "Ada trusts Mira's practical judgment while remaining guarded about guild matters.";
+  h.setResponse(async () => ({ content: JSON.stringify(corrected) })); h.addTurn("Ada and Mira agree to cooperate on the signal.", "a2");
+  await restarted.schedule("chat", {}, "owner"); assert.equal(h.requests.length, count + 1);
+  assert.equal((await restarted.status("chat", "owner")).code, "active");
+  assert.equal((await restarted.loadStore("chat")).current.characters[0].profile.age, "Early thirties");
+});
+
 test("rejected turns pause automatic calls across events and restart until explicitly reprocessed", async () => {
   const h = harness(); await h.select(); const initial = await h.engine.loadStore("chat");
   h.addTurn("Ada nods."); h.setResponse(async () => ({ content: "invalid" }));

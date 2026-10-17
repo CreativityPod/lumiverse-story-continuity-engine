@@ -1,3 +1,10 @@
+# 1.7.2
+
+- Define relationship privateState as a concise current relationship summary, with separate guidance for publicStatus and boundaryOrConcern, asymmetric feelings, current commitments, uncertainty and user control. Consolidate selected existing recaps faithfully; keep scene context focused on current circumstances instead of accumulating past turns.
+- State exact text limits in tracker instructions and report actual length/maximum, empty values and reserved markup in validation/repair. Preserve the 1,600-character limit and request meaningful summarization in the existing repair attempt. If still overlong, shorten plain privateState/immediateContext summaries at a sentence/word boundary with a persistent shortened warning; identity, boundary, clock, objective and physical safeguards remain intact.
+- Resolve current warnings automatically after a later valid explicit replacement of the same entity/field. Deduplicate repeated failures, show readable entity names, and flag relevant pending fields in the next routine call. Keep historical checkpoints unchanged so branch rewinds and forks restore their own warnings; restarts retain successful resolution. Explicit retry skips warnings already resolved by later turns.
+- Add bounded accepted-field receipts outside canonical state; infer actual value changes for older checkpoints without migration, new model calls or replay. Extend regressions for the reported 2,190-character failure, repair, shortening, clearing, same-value replacements, field/identity isolation, restart, forks/rewinds and drawer warnings. Tracker contract is now 10; canonical schema and macros stay unchanged.
+
 # 1.7.1
 
 - Save independently valid tracker changes when the single repair cannot fix every component. Invalid fields retain prior values; valid profile, clothing, clock and relationship changes survive unrelated failures. Usable original output can also survive a malformed or unavailable repair.

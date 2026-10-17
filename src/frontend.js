@@ -354,7 +354,9 @@ export function setup(ctx) {
     const info = status.trackerInfo;
     effectiveMode.textContent = info ? `Effective output: ${info.outputMode}${info.outputMode === "plain" ? " (prompt-only JSON; select a structured mode if supported)" : ""}${info.provider ? ` · ${info.provider}` : ""}${info.model ? ` · ${info.model}` : ""}` : "";
     trackingHint.textContent = status.partialUpdates?.length
-      ? `Valid updates are saved. Unresolved components: ${status.partialUpdates.slice(0, 8).map(update => `${update.sourceMessageId}: ${update.fields.join(", ")}`).join("; ")}. ${info?.retryPaused ? `A later failure at message ${info.pendingMessageId || "awaiting retry"} has paused tracking; use Reprocess Latest Turn to retry it.` : "Later turns can continue."} Use Retry Incomplete Tracking to retry incomplete components; later turns may be replayed.`
+      ? `Valid updates are saved. Fields needing attention: ${status.partialUpdates.slice(0, 8).map(update => update.components?.length
+        ? update.components.map(component => `${component.label}: ${component.field}${component.shortened ? ` (shortened${component.originalLength ? ` from ${component.originalLength} characters` : ""})` : ""}`).join(", ")
+        : update.fields.join(", ")).join("; ")}. ${info?.retryPaused ? `A later failure at message ${info.pendingMessageId || "awaiting retry"} has paused tracking; use Reprocess Latest Turn to retry it.` : "Later turns can continue."} A later complete valid replacement clears its warning. Use Retry Incomplete Tracking to retry incomplete components; later turns may be replayed.`
       : info?.retryPaused ? `Showing the saved failure for message ${info.pendingMessageId || "awaiting retry"}. Automatic retries are paused; later turns remain pending. Last tracked: ${info.lastTrackedMessageId || "none"}.`
       : info?.pendingMessageId ? `Tracking is pending for message ${info.pendingMessageId}. Last tracked: ${info.lastTrackedMessageId || "none"}.`
       : info?.lastTrackedMessageId ? `Last tracked message: ${info.lastTrackedMessageId}.` : "";

@@ -108,6 +108,20 @@ test("partial tracking has a warning, retained snapshot and explicit retry witho
   } finally { h.restore(); }
 });
 
+test("shortened summary warnings use character names and disappear after a complete update", () => {
+  for (const native of [false, true]) {
+    const h = mountHarness(native);
+    try {
+      h.status({ code: "partial", partialUpdates: [{ sourceMessageId: "source-message-uuid", fields: ["relationships[0].privateState"],
+        components: [{ label: "Ada → Traveler", field: "privateState", shortened: true, originalLength: 2190 }] }] });
+      assert.match(document.body.textContent, /Ada → Traveler: privateState \(shortened from 2190 characters\)/);
+      assert.ok(!document.body.textContent.includes("source-message-uuid")); assert.match(document.body.textContent, /later complete valid replacement clears its warning/);
+      h.status({ code: "active", partialUpdates: [], text: "Story continuity is current." });
+      assert.ok(!document.body.textContent.includes("shortened from")); assert.equal(h.button("Retry Incomplete Tracking").hidden, true);
+    } finally { h.restore(); }
+  }
+});
+
 test("drawer preserves unsaved settings and sends one concrete settings payload", () => {
   const h = mountHarness();
   try {

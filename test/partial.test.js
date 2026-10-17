@@ -26,7 +26,7 @@ function harness(responses) {
 }
 
 test("invalid relationship prose cannot discard valid profile, outfit, clock or other relationship fields", async () => {
-  for (const bad of ["", "x".repeat(1601), "<!--invalid-->"]) {
+  for (const bad of ["", "<!--invalid-->"]) {
     const previous = cast(), before = structuredClone(previous);
     const proposed = output({ world: patch(null, [["time", "21:05"]]), characters: [patch("c1", [["profile.age", "Early thirties"], ["visible.dressAndLayers", "White shirt; coat on bench"]])],
       relationships: [patch("r1", [["privateState", bad], ["publicStatus", "Friends"]])] });

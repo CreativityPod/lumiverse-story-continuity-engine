@@ -1,4 +1,4 @@
-import { TRACKER_SCHEMA_VERSION, TrackerScopeError, materializeTrackerOutput } from "./schemas.js";
+import { TRACKER_SCHEMA_VERSION, TRACKER_TEXT_LIMITS, TrackerScopeError, materializeTrackerOutput } from "./schemas.js";
 import { TRACKER_COLLECTIONS, trackerFieldPaths } from "./protocol.js";
 import { decodeModelOutput } from "./aliases.js";
 
@@ -14,8 +14,102 @@ export function normalizePartialUpdate(value) {
     kind: issue.kind, id: text(issue.id), alias: text(issue.alias), path: text(issue.path), code: text(issue.code),
     fields: issue.fields === null ? null : [...new Set((Array.isArray(issue.fields) ? issue.fields : [])
       .filter(field => trackerFieldPaths(issue.kind).includes(field)))],
+    ...(issue.code === "truncated_text" ? { originalLength: Number.isFinite(issue.originalLength) ? Math.max(0, Math.round(issue.originalLength)) : 0 } : {}),
   }));
   return issues.length ? { sourceMessageId: text(value.sourceMessageId), issues } : null;
+}
+
+// These receipts contain only identities/field paths, never model prose. Older
+// checkpoints have no receipts; their actual value changes remain usable evidence.
+export function normalizeAcceptedUpdates(value) {
+  if (!Array.isArray(value)) return undefined;
+  const merged = new Map();
+  for (const entry of value.slice(0, 256)) {
+    if (!plain(entry) || !kinds.includes(entry.kind) || !Array.isArray(entry.fields)) continue;
+    const id = entry.kind === "world" ? "world" : text(entry.id);
+    if (!id) continue;
+    const key = `${entry.kind}:${id}`, prior = merged.get(key);
+    const fields = [...new Set([...(prior?.fields ?? []), ...entry.fields.filter(field => trackerFieldPaths(entry.kind).includes(field))])];
+    if (fields.length) merged.set(key, { kind: entry.kind, id, fields });
+  }
+  return [...merged.values()];
+}
+
+export function acceptedTrackerUpdates(output, registry, state, { allowedUpdateIds, excludedIssues = [] } = {}) {
+  const updates = [];
+  for (const kind of kinds) for (const record of kind === "world" ? [output.world] : output[kind] ?? []) {
+    if (!plain(record) || record.action === "preserve") continue;
+    const alias = aliasOf(record);
+    const id = kind === "world" ? "world" : registry.reverse.get(alias)?.id ?? (registry.creation.has(alias) ? registry.allocate(alias).id : "");
+    if (kind !== "world" && (!state[kind].some(entry => entry.id === id)
+      || allowedUpdateIds && registry.reverse.has(alias) && !allowedUpdateIds[kind]?.has(id))) continue;
+    const excluded = excludedIssues.filter(issue => issue.kind === kind && (kind === "world" || issue.id === id || issue.alias === alias));
+    const fields = offeredFields(record, kind).filter(field => !excluded.some(issue => issue.fields === null || issue.fields.includes(field)));
+    if (fields.length) updates.push({ kind, id, fields });
+  }
+  return normalizeAcceptedUpdates(updates);
+}
+
+const fieldValue = (record, field) => field.split(".").reduce((value, key) => value?.[key], record);
+function changedStateFields(previous, state) {
+  const updates = [];
+  for (const kind of kinds) for (const record of kind === "world" ? [state?.world] : state?.[kind] ?? []) {
+    if (!record) continue;
+    const prior = kind === "world" ? previous?.world : previous?.[kind]?.find(entry => entry.id === record.id);
+    const fields = trackerFieldPaths(kind).filter(field => fieldValue(prior, field) !== fieldValue(record, field));
+    if (fields.length) updates.push({ kind, id: kind === "world" ? "world" : record.id, fields });
+  }
+  return updates;
+}
+
+// Derive CURRENT attention from the selected history without rewriting historical
+// failures. A branch rewind therefore restores its own warnings automatically.
+export function activePartialUpdates(store) {
+  const pending = new Map();
+  const add = value => {
+    const partial = normalizePartialUpdate(value);
+    if (!partial) return;
+    for (const issue of partial.issues) for (const field of issue.fields ?? ["*"]) {
+      const identity = issue.kind === "world" ? "world" : issue.id || `${partial.sourceMessageId}:${issue.alias}`;
+      pending.set(`${issue.kind}:${identity}:${field}`, { sourceMessageId: partial.sourceMessageId,
+        issue: { ...issue, fields: field === "*" ? null : [field] } });
+    }
+  };
+  if (store?.baseline) add(store.baselinePartial);
+  let previous = store?.baseline;
+  for (const checkpoint of Object.values(store?.checkpoints ?? {})) {
+    const accepted = normalizeAcceptedUpdates([...changedStateFields(previous, checkpoint.state), ...(normalizeAcceptedUpdates(checkpoint.acceptedUpdates) ?? [])]);
+    for (const [key, entry] of pending) {
+      const issue = entry.issue;
+      const receipt = accepted.find(update => update.kind === issue.kind && (issue.kind === "world" || issue.id && update.id === issue.id));
+      // Unidentified failures cannot be matched by an array index or stale alias.
+      const required = issue.fields ?? trackerFieldPaths(issue.kind);
+      if (receipt && required.every(field => receipt.fields.includes(field))) pending.delete(key);
+    }
+    add(checkpoint.partial); previous = checkpoint.state;
+  }
+  const grouped = new Map();
+  for (const { sourceMessageId, issue } of pending.values()) {
+    if (!grouped.has(sourceMessageId)) grouped.set(sourceMessageId, { sourceMessageId, issues: [] });
+    grouped.get(sourceMessageId).issues.push(issue);
+  }
+  return [...grouped.values()];
+}
+
+function shortenSummary(record, field) {
+  const change = Array.isArray(record.changes) ? record.changes.find(entry => entry?.field === field) : null;
+  const raw = change ? change.value : fieldValue(record, field);
+  if (typeof raw !== "string") return null;
+  const value = raw.replace(/\r\n?/g, "\n").trim(), limit = TRACKER_TEXT_LIMITS.text;
+  if (value.length <= limit || /<!--|-->|<\/?story_continuity/i.test(value)) return null;
+  let shortened = value.slice(0, limit - 2);
+  const sentences = [...shortened.matchAll(/[.!?。！？](?=\s|$)/g)];
+  const boundary = sentences.at(-1)?.index;
+  if (boundary >= limit * 0.6) shortened = shortened.slice(0, boundary + 1);
+  else if (shortened.lastIndexOf(" ") >= limit * 0.8) shortened = shortened.slice(0, shortened.lastIndexOf(" "));
+  shortened = shortened.replace(/[\uD800-\uDBFF]$/, "").trimEnd() + " …";
+  if (change) change.value = shortened; else record[field] = shortened;
+  return value.length;
 }
 
 function removeFields(record, fields) {
@@ -49,6 +143,7 @@ export function recoverPartialTrackerOutput(output, registry, options = {}) {
     }
   };
   const drop = (kind, alias, code, path) => {
+    for (let index = issues.length - 1; index >= 0; index--) if (issues[index].kind === kind && issues[index].alias === alias && issues[index].code === "truncated_text") issues.splice(index, 1);
     note(kind, alias, null, code, path);
     if (kind === "world") candidate.world = { action: "preserve", changes: [] };
     else candidate[kind] = candidate[kind].filter(record => aliasOf(record) !== alias);
@@ -76,7 +171,8 @@ export function recoverPartialTrackerOutput(output, registry, options = {}) {
       const decoded = decodeModelOutput(candidate, registry, options);
       const state = materializeTrackerOutput(decoded, registry.previousState, options.sourceMessageId, options);
       const partial = normalizePartialUpdate({ sourceMessageId: options.sourceMessageId, issues: [...issues.map(issue => ({ ...issue, id: issue.kind !== "world" && !state[issue.kind].some(record => record.id === issue.id) ? "" : issue.id })), ...(options.pendingIssues ?? [])] });
-      return partial ? { state, partial } : null;
+      return partial ? { state, partial, acceptedUpdates: acceptedTrackerUpdates(candidate, registry, state,
+        { ...options, excludedIssues: partial.issues }) } : null;
     } catch (error) {
       if (error instanceof TrackerScopeError) {
         for (const violation of error.violations) {
@@ -103,6 +199,16 @@ export function recoverPartialTrackerOutput(output, registry, options = {}) {
         const alias = kind === "world" ? "world" : aliasOf(record);
         const field = issue.path.replace(/^(?:world\.|[a-z]+\[\d+\]\.)/, "");
         if (options.requireInitialScene && (issue.code === "missing_initial_value" || kind === "world" && ["date", "time", "weather", "sceneStatus"].includes(field))) return null;
+        // Only narrative summaries may be shortened, after the existing repair.
+        // Identity, clock, boundary, objective and physical fields keep their guards.
+        if (issue.code === "invalid_text" && (kind === "relationships" && field === "privateState" || kind === "world" && field === "immediateContext")) {
+          const originalLength = shortenSummary(record, field);
+          if (originalLength) {
+            note(kind, alias, [field], "truncated_text", issue.path);
+            issues.find(entry => entry.kind === kind && entry.alias === alias && entry.code === "truncated_text").originalLength = originalLength;
+            changed = true; continue;
+          }
+        }
         if (kind === "world" && ["date", "time"].includes(field)) {
           changed = hold(kind, record, ["date", "time"], issue.code, issue.path) || changed;
         } else if (kind === "relationships" && ["fromId", "toId"].includes(field) || kind === "objectives"

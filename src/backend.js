@@ -1,4 +1,4 @@
-import { normalizePartialUpdate } from "./partial.js";
+import { normalizePartialUpdate, normalizeAcceptedUpdates, activePartialUpdates } from "./partial.js";
 import { validateState, publicTrackerSnapshot, remapStateSources, legacyTrackerState } from "./schemas.js";
 import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
@@ -96,15 +96,24 @@ export function createStoryEngine(api) {
     let setupProgress = store?.setupProgress && { ...store.setupProgress };
     if (setupProgress?.status === "running" && !busy) setupProgress = { ...setupProgress, status: "failed", error: interruptedSetupError, finishedAt: setupProgress.updatedAt, interrupted: true };
     if (setupProgress) setupProgress.elapsedMs = setupProgress.startedAt ? Math.max(0, (setupProgress.finishedAt ?? Date.now()) - setupProgress.startedAt) : 0;
-    const partialUpdates = [store?.baselinePartial, ...Object.values(store?.checkpoints ?? {}).map(checkpoint => checkpoint.partial)]
-      .map(normalizePartialUpdate).filter(Boolean);
+    const partialUpdates = activePartialUpdates(store);
+    const componentLabel = issue => {
+      if (issue.kind === "world") return "Scene";
+      const record = store.current?.[issue.kind]?.find(entry => entry.id === issue.id);
+      const name = id => store.current?.characters.find(char => char.id === id)?.name ?? "Character";
+      return issue.kind === "relationships" && record ? `${name(record.fromId)} → ${name(record.toId)}`
+        : record?.name ?? ({ characters: "Character", relationships: "Relationship", places: "Place", objectives: "Objective" }[issue.kind]);
+    };
     const code = !chatId ? "idle" : missing.length ? "permissions" : !config.enabled ? "disabled" : store.blocked ? "specialized" : busy ? "processing" : store.lastError || setupProgress?.status === "failed" ? "degraded" : store.awaitingSetup ? "setup" : partialUpdates.length ? "partial" : store.current ? "active" : "ready";
     const text = { idle: "Open a character chat to begin.", permissions: `Grant required permissions: ${missing.join(", ")}.`, disabled: "Story continuity tracking is disabled.",
       specialized: store?.blocked, processing: "Updating character and world continuity…", degraded: setupProgress?.status === "failed" ? "Initial setup stopped. Expand error details below." : store?.lastError,
-      partial: "Tracking partially updated. Valid changes are saved; some components retain their previous values.",
+      partial: "Tracking partially updated. Valid changes are saved; some fields need attention.",
       setup: "Choose Import Saved Setup or Create From Character Card.", active: "Story continuity is current.", ready: "Checking story setup…" }[code];
     const payload = { type: "story_status", chatId, config, code, text, processing: Boolean(busy), level: code === "active" ? "green" : "amber",
-      partialUpdateCount: partialUpdates.length, partialUpdates: partialUpdates.slice(0, 32).map(update => ({ sourceMessageId: update.sourceMessageId, fields: [...new Set(update.issues.map(issue => issue.path))].slice(0, 24) })),
+      partialUpdateCount: partialUpdates.length, partialUpdates: partialUpdates.slice(0, 32).map(update => ({ sourceMessageId: update.sourceMessageId,
+        fields: [...new Set(update.issues.map(issue => issue.path))].slice(0, 24),
+        components: update.issues.slice(0, 24).flatMap(issue => (issue.fields ?? ["record"]).map(field => ({ label: componentLabel(issue), field,
+          shortened: issue.code === "truncated_text", ...(issue.originalLength ? { originalLength: issue.originalLength } : {}) }))) })),
       revision: store?.revision ?? 0, lastRevisionAt: store?.lastRevisionAt ?? "", cardChanged: Boolean(store?.pendingCardFingerprint),
       snapshot: store && !store.blocked ? publicTrackerSnapshot(store.current) : null, canExport: Boolean(store?.initialSetup),
       setupPreview: !store?.blocked && !store?.current && store?.setupDraft ? {
@@ -274,25 +283,27 @@ export function createStoryEngine(api) {
         setupRun = true; await setupStage(store, "reading", userId, { start: true, attempt: 0 });
       }
       if (options.retryPartial) {
-        const baselineRetry = normalizePartialUpdate(store.baselinePartial);
         const reusable = validCheckpointPrefix(store, turns);
-        const retryIndex = baselineRetry ? -1 : turns.slice(0, reusable.count).findIndex(turn => normalizePartialUpdate(reusable.checkpoints[turn.key]?.partial));
+        const active = activePartialUpdates({ ...store, checkpoints: reusable.checkpoints });
+        const baselineRetry = active.some(update => update.sourceMessageId === "card-baseline") ? normalizePartialUpdate(store.baselinePartial) : null;
+        const retryIndex = baselineRetry ? -1 : turns.slice(0, reusable.count).findIndex(turn => active.some(update => update.sourceMessageId === String(turn.assistant.id)));
         const checkpoint = retryIndex >= 0 ? store.checkpoints[turns[retryIndex].key] : null;
         const pending = baselineRetry ?? normalizePartialUpdate(checkpoint?.partial);
         if (pending) {
-          let remainingPartial = null;
+          let remainingPartial = null, acceptedUpdates = [];
           const turn = retryIndex >= 0 ? turns[retryIndex] : null;
           const corrected = await runTracker(api, { initialize: Boolean(baselineRetry), retryPartial: pending,
             sources: store.sources, previousState: baselineRetry ? store.baseline : checkpoint.state,
             userText: contentToText(turn?.user?.content), assistantText: contentToText(turn?.assistant?.content),
             sourceMessageId: baselineRetry ? "card-baseline" : String(turn.assistant.id),
             remainingMs: Math.max(1000, deadline - Date.now()),
-            onPartial: value => { remainingPartial = value; }, onDiagnostic: captureDiagnostics }, config, userId);
+            onPartial: value => { remainingPartial = value; }, onAccepted: value => { acceptedUpdates = value; }, onDiagnostic: captureDiagnostics }, config, userId);
           if (deleted.has(chatId) || (baselineRetry ? fingerprint((await getSources(chatId, await api.chat.getMessages(chatId), userId)).sources) !== currentFingerprint
             : !(await matches(chatId, messages, turn.index)))) throw new Error("The selected branch changed during retry; stale output was discarded.");
           if (baselineRetry) { store.baseline = corrected; store.baselinePartial = remainingPartial; store.checkpoints = {}; store.initialSetup = null; }
           else {
             checkpoint.state = corrected; checkpoint.partial = remainingPartial;
+            checkpoint.acceptedUpdates = normalizeAcceptedUpdates([...(checkpoint.acceptedUpdates ?? []), ...acceptedUpdates]);
             for (let index = retryIndex + 1; index < turns.length; index++) delete store.checkpoints[turns[index].key];
           }
           commitRevision(store);
@@ -316,9 +327,10 @@ export function createStoryEngine(api) {
           store.initialWorldDefaults = { sourceFingerprint: store.sourceFingerprint, values: createInitialWorldDefaults() };
           await saveStore(store);
         }
+        let baselinePartial = null;
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, fillMissingSceneDetails: store.fillMissingSceneDetails,
           initialWorldDefaults: store.initialWorldDefaults.values,
-          onPartial: value => { store.baselinePartial = value; },
+          onPartial: value => { baselinePartial = value; },
           sourceMessageId: "card-baseline", remainingMs: remaining(), onDiagnostic: captureDiagnostics,
           onSetupPreview: async preview => {
             store.setupDraft = { ...preview, sourceFingerprint: store.sourceFingerprint, capturedAt: Date.now() };
@@ -329,7 +341,7 @@ export function createStoryEngine(api) {
         const fresh = await getSources(chatId, freshMessages, userId);
         if (fingerprint(fresh.sources) !== currentFingerprint || deleted.has(chatId)) throw new Error("Card or opening changed during initialization; retry on the selected state.");
         await setupStage(store, "saving", userId);
-        store.baseline = baseline; store.current = baseline; store.setupDraft = null; store.setupTargetMessageId = null; commitRevision(store);
+        store.baseline = baseline; store.baselinePartial = baselinePartial; store.current = baseline; store.setupDraft = null; store.setupTargetMessageId = null; commitRevision(store);
         await saveStore(store); await mirror(store);
         await setupStage(store, "ready", userId);
       }
@@ -348,13 +360,14 @@ export function createStoryEngine(api) {
           return;
         }
         store.rejectedTurn = null; trackerAttempt = signature;
-        let partial = null;
+        let partial = null, acceptedUpdates = [];
         const state = isOpening ? previousState : await runTracker(api, { sources: store.sources, previousState, focusCharacterId: turn.assistant.character_id,
           userText: contentToText(turn.user?.content), assistantText: contentToText(turn.assistant.content),
-          sourceMessageId: String(turn.assistant.id), isOpening, onPartial: value => { partial = value; }, remainingMs: remaining(), onDiagnostic: captureDiagnostics }, config, userId);
+          sourceMessageId: String(turn.assistant.id), isOpening, pendingUpdates: activePartialUpdates(store), onPartial: value => { partial = value; },
+          onAccepted: value => { acceptedUpdates = value; }, remainingMs: remaining(), onDiagnostic: captureDiagnostics }, config, userId);
         trackerAttempt = null;
         if (!(await matches(chatId, messages, turn.index))) throw new Error("The selected branch changed during tracking; stale output was discarded.");
-        store.checkpoints[turn.key] = { fingerprint: turn.fingerprint, state, partial, createdAt: new Date().toISOString() };
+        store.checkpoints[turn.key] = { fingerprint: turn.fingerprint, state, partial, acceptedUpdates, createdAt: new Date().toISOString() };
         store.current = state; previousState = state; store.lastTrackedMessageId = String(turn.assistant.id); commitRevision(store);
         if (!context.anchor && index === 0 && (!store.initialSetup || store.initialSetup.fingerprint !== turn.fingerprint)) store.initialSetup = { key: turn.key, fingerprint: turn.fingerprint, state: structuredClone(state) };
         await saveStore(store); await mirror(store);
@@ -408,7 +421,7 @@ export function createStoryEngine(api) {
     if ((selectedContext.anchor ? `import:${selectedContext.anchor.id}` : store.epoch.startsWith("import:") ? "removed-import" : store.epoch) !== store.epoch) return clean;
     const prefix = validCheckpointPrefix(store, listEligibleTurns(selectedMessages, selectedContext));
     const latestAssistant = selectedMessages.findLast(message => message.role === "assistant" && !message.metadata?.story_continuity_setup && !isInitializationNotice(message));
-    return prefix.previousState ? injectContinuity(clean, prefix.previousState, store.lastError ? "using last valid checkpoint" : store.baselinePartial || Object.values(prefix.checkpoints).some(checkpoint => checkpoint.partial) ? "partial tracking" : "active", {
+    return prefix.previousState ? injectContinuity(clean, prefix.previousState, store.lastError ? "using last valid checkpoint" : activePartialUpdates({ ...store, checkpoints: prefix.checkpoints }).length ? "partial tracking" : "active", {
       focusCharacterId: context.characterId ?? context.targetCharacterId ?? latestAssistant?.character_id,
       recentText: contentToText(latestAssistant?.content),
       sources: store.sources,
