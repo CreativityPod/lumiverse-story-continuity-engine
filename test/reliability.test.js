@@ -237,7 +237,7 @@ test("world-only repair retains initial profiles AND valid date/time/weather in 
   }
 });
 
-test("initial repair reports missing starting values alongside an undeclared user reference", async () => {
+test("initial repair retains programmatic world defaults while repairing a user reference and outfit", async () => {
   const sources = structuredClone(SOURCES); sources.cards[0].name = "Emily";
   const rejected = initialOutput("active");
   for (const change of rejected.world.changes) if (["date", "time", "weather"].includes(change.field)) change.value = "Unknown";
@@ -247,23 +247,27 @@ test("initial repair reports missing starting values alongside an undeclared use
   rejected.relationships.push(patch("new_r1", [["fromId", "c1"], ["toId", "new_u1"], ["publicStatus", "Family friends"]]));
   const h = mock([{ content: JSON.stringify(rejected) }, request => {
     const repair = request.messages.at(-1).content;
-    for (const issue of ["relationships[0].toId", "world.date", "world.time", "world.weather", "characters[0].visible.dressAndLayers"]) assert.ok(repair.includes(issue), issue);
+    for (const issue of ["relationships[0].toId", "characters[0].visible.dressAndLayers"]) assert.ok(repair.includes(issue), issue);
+    assert.ok(!repair.includes("Initial scene requires world."));
     assert.match(repair, /TARGETED REPAIR/);
-    return { content: JSON.stringify(output({ world: patch(null, [["date", "Day 1"], ["time", "16:00"], ["weather", "Mild and clear"]]),
+    return { content: JSON.stringify(output({ world: patch(null, [["date", "Unknown"], ["time", "Unknown"], ["weather", "Unknown"]]),
       characters: [patch("c1", [["visible.dressAndLayers", "Casual shirt and trousers"]]), patch("new_u1", [["name", "User"]])],
       relationships: [patch("new_r1", [["toId", "new_u1"]])] })) };
   }]);
   const previews = [];
-  const next = await runTracker(h.api, { initialize: true, sources, sourceMessageId: "card-baseline", onSetupPreview: preview => previews.push(preview) }, {});
+  const defaults = { date: "2031-06-12", time: "16:00", weather: "Clear skies" };
+  const next = await runTracker(h.api, { initialize: true, sources, initialWorldDefaults: defaults, sourceMessageId: "card-baseline", onSetupPreview: preview => previews.push(preview) }, {});
   assert.equal(h.requests.length, 2);
-  assert.equal(next.world.date, "Day 1"); assert.equal(next.world.time, "16:00"); assert.equal(next.world.weather, "Mild and clear"); assert.equal(next.world.location, "Family home");
+  for (const field of ["date", "time", "weather"]) assert.equal(next.world[field], defaults[field]);
+  assert.equal(next.world.location, "Family home");
   assert.equal(next.characters[0].name, "Emily"); assert.equal(next.characters[0].profile.identity, "Mechanic"); assert.equal(next.characters[0].profile.privateFacts, "Lantern Guild");
   assert.equal(next.characters[0].visible.dressAndLayers, "Casual shirt and trousers");
   const user = next.characters.find(char => char.controller === "user"); assert.ok(user);
   assert.ok(Object.values(user.internal).every(value => value === "Unknown")); assert.equal(user.visible.dressAndLayers, "Unknown");
   assert.equal(next.relationships[0].toId, user.id); assert.equal(next.relationships[0].publicStatus, "Family friends");
   assert.equal(previews[0].state.characters[0].profile.identity, "Mechanic");
-  for (const field of ["world.date", "world.time", "world.weather"]) assert.ok(previews[0].unavailableFields.includes(field));
+  assert.deepEqual(previews[0].unavailableFields, []);
+  for (const field of ["date", "time", "weather"]) assert.equal(previews[0].state.world[field], defaults[field]);
 });
 
 test("the reported world.sceneStatus failure retains independently validated profiles after both attempts fail", async () => {

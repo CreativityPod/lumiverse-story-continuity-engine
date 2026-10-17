@@ -100,7 +100,7 @@ test("initial world failure displays validated profiles across restart without c
   assert.equal((await restarted.loadStore("chat")).setupDraft, null);
 });
 
-test("reference-only setup repair cannot commit missing defaults and Retry preserves the original chat", async () => {
+test("reference-only setup repair cannot commit a missing outfit and Retry reuses saved world defaults", async () => {
   const h = harness(), initial = modelOutput(undefined, { initialize: true }), original = structuredClone(h.messages.get("chat"));
   for (const field of ["date", "time", "weather"]) initial.world[field] = "Unknown";
   initial.characters[0].visible.dressAndLayers = "Unknown";
@@ -113,15 +113,40 @@ test("reference-only setup repair cannot commit missing defaults and Retry prese
   const failed = await h.engine.loadStore("chat");
   assert.equal(failed.baseline, null); assert.equal(failed.current, null); assert.deepEqual(failed.checkpoints, {});
   assert.equal(failed.setupDraft.state.characters[0].profile.identity, "Mechanic");
-  assert.equal(failed.trackerDiagnostics.attempts[0].issues.length, 5);
-  for (const field of ["world.date", "world.time", "world.weather"]) assert.ok(failed.setupDraft.unavailableFields.includes(field));
+  assert.equal(failed.trackerDiagnostics.attempts[0].issues.length, 2);
+  const defaults = failed.initialWorldDefaults;
+  for (const field of ["date", "time", "weather"]) assert.equal(failed.setupDraft.state.world[field], defaults.values[field]);
+  assert.deepEqual(failed.setupDraft.unavailableFields, []);
   assert.equal(h.variables.get(`chat:${CHAT_KEYS.visual}`), ""); assert.deepEqual(h.messages.get("chat"), original);
-  const restarted = createStoryEngine(h.api); h.setResponse(null);
+  const restarted = createStoryEngine(h.api), retry = modelOutput(undefined, { initialize: true });
+  for (const field of ["date", "time", "weather"]) retry.world[field] = "Unknown";
+  h.setResponse(async () => ({ content: JSON.stringify(retry) }));
   await restarted.schedule("chat", {}, "owner"); assert.equal(h.requests.length, 2);
   await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "retry-incomplete" }, "owner");
   assert.equal(h.requests.length, 3); assert.equal((await restarted.loadStore("chat")).current.characters[0].name, "Ada");
+  assert.deepEqual((await restarted.loadStore("chat")).initialWorldDefaults, defaults);
+  for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], defaults.values[field]);
   assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /DRESS & LAYERS: Blue coat/);
   assert.deepEqual(h.messages.get("chat"), original);
+});
+
+test("programmatic world defaults survive restart, reprocess and portable setup import without extra calls", async () => {
+  const h = harness(), proposed = modelOutput(undefined, { initialize: true });
+  for (const field of ["date", "time", "weather"]) proposed.world[field] = "Unknown";
+  h.setResponse(async () => ({ content: JSON.stringify(proposed) }));
+  await h.select(); assert.equal(h.requests.length, 1);
+  const store = await h.engine.loadStore("chat"), values = store.initialWorldDefaults.values;
+  for (const field of ["date", "time", "weather"]) assert.equal(store.current.world[field], values[field]);
+  assert.ok(h.variables.get(`chat:${CHAT_KEYS.visual}`).includes(values.date));
+  const restarted = createStoryEngine(h.api);
+  await restarted.schedule("chat", { reprocess: true }, "owner"); assert.equal(h.requests.length, 1);
+  for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], values[field]);
+  await restarted.handleFrontend({ type: "story_export_setup", chatId: "chat", requestId: "random-export" }, "owner");
+  const exported = h.sent.at(-1).payload; assert.equal(exported.ok, true);
+  assert.ok(!exported.fileText.includes("initialWorldDefaults"));
+  await restarted.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: exported.fileText, requestId: "random-import" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 1);
+  for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], values[field]);
 });
 
 test("v1.5.3 failed setup evidence can restore a preview locally without running generation", async () => {

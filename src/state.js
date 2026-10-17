@@ -2,6 +2,7 @@ import { cloneEmptyState, validateState, remapStateSources } from "./schemas.js"
 import { buildRoleplayContext } from "./context.js";
 import { renderContinuityContext } from "./render.js";
 import { normalizeTrackerDiagnostics } from "./diagnostics.js";
+import { normalizeInitialWorldDefaults } from "./clock.js";
 
 export const SETUP_FORMAT = "story-continuity-initial-setup";
 export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the Story Continuity drawer when ready.";
@@ -106,7 +107,7 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
     initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    setupDraft: null, trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
+    setupDraft: null, initialWorldDefaults: null, trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
     lastTrackedMessageId: "", initializationMode: "", fillMissingSceneDetails: false, setupProgress: null, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
@@ -114,6 +115,9 @@ export function normalizeStore(value, chatId) {
   const empty = createStore(chatId);
   if (!value || value.schemaVersion !== 1 || value.chatId !== chatId) return empty;
   const next = { ...empty, ...value, processing: false };
+  const initialWorldDefaults = normalizeInitialWorldDefaults(value.initialWorldDefaults?.values);
+  next.initialWorldDefaults = initialWorldDefaults && value.initialWorldDefaults.sourceFingerprint === next.sourceFingerprint
+    ? { sourceFingerprint: next.sourceFingerprint, values: initialWorldDefaults } : null;
   next.trackerDiagnostics = normalizeTrackerDiagnostics(value.trackerDiagnostics);
   next.trackerMetrics = Object.fromEntries(Object.keys(empty.trackerMetrics).map(key => [key, Number.isFinite(value.trackerMetrics?.[key]) && value.trackerMetrics[key] >= 0 ? value.trackerMetrics[key] : 0]));
   next.lastTrackedMessageId = typeof value.lastTrackedMessageId === "string" ? value.lastTrackedMessageId.slice(0, 180) : "";

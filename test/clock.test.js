@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeStoryClockValue } from "../src/clock.js";
+import { normalizeStoryClockValue, createInitialWorldDefaults, normalizeInitialWorldDefaults, applyInitialWorldDefaults, INITIAL_WEATHER_CHOICES } from "../src/clock.js";
 import { expandTrackerRecord } from "../src/protocol.js";
 import { fixtureState } from "./fixtures.js";
+
+test("random starting values have valid fixed-range dates, local minutes and modest weather choices", () => {
+  assert.deepEqual(createInitialWorldDefaults(() => 0), { date: "2020-01-01", time: "00:00", weather: "Clear skies" });
+  assert.deepEqual(createInitialWorldDefaults(() => .999999), { date: "2039-12-31", time: "23:59", weather: INITIAL_WEATHER_CHOICES.at(-1) });
+  const values = createInitialWorldDefaults(() => .42);
+  assert.deepEqual(normalizeInitialWorldDefaults(values), values);
+  assert.equal(normalizeInitialWorldDefaults({ ...values, date: "2031-02-29" }), null);
+  assert.equal(normalizeInitialWorldDefaults({ ...values, time: "24:00" }), null);
+  assert.equal(normalizeInitialWorldDefaults({ ...values, weather: "Unknown" }), null);
+  const original = { action: "preserve", date: "Unknown", time: "After sunset", weather: "Unknown.", location: "Station" };
+  assert.deepEqual(applyInitialWorldDefaults(original, values), { ...original, action: "update", date: values.date, weather: values.weather });
+  assert.equal(original.date, "Unknown"); assert.equal(original.action, "preserve");
+  assert.equal(applyInitialWorldDefaults({ ...original, action: "invalid" }, values).action, "invalid");
+  assert.deepEqual(applyInitialWorldDefaults({ ...original, date: "Late autumn", weather: "No atmosphere" }, values), { ...original, date: "Late autumn", weather: "No atmosphere" });
+});
 
 test("exact fictional dates and local times normalize without using the host clock", () => {
   for (const [input, expected] of [["2031-6-2", "2031-06-02"], ["2000-2-29", "2000-02-29"]]) assert.equal(normalizeStoryClockValue("date", input), expected);

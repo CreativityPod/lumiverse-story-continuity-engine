@@ -23,6 +23,17 @@ test("setup previews are isolated from committed state and invalid or different-
   assert.equal(normalizeStore(store, "chat").setupDraft, null);
 });
 
+test("saved world defaults survive normalization only for matching sources and valid values", () => {
+  const store = createStore("chat"); store.sourceFingerprint = "current-sources"; store.current = fixtureState();
+  store.initialWorldDefaults = { sourceFingerprint: "current-sources", values: { date: "2031-06-12", time: "16:00", weather: "Clear skies" } };
+  assert.deepEqual(normalizeStore(store, "chat").initialWorldDefaults, store.initialWorldDefaults);
+  store.initialWorldDefaults.sourceFingerprint = "old-sources";
+  assert.equal(normalizeStore(store, "chat").initialWorldDefaults, null);
+  store.initialWorldDefaults.sourceFingerprint = "current-sources"; store.initialWorldDefaults.values.date = "2031-02-29";
+  const normalized = normalizeStore(store, "chat");
+  assert.equal(normalized.initialWorldDefaults, null); assert.deepEqual(normalized.current, store.current);
+});
+
 test("initialization uses selected greeting and excludes alternate greeting and instruction fields", () => {
   const card = { ...CARD, alternate_greetings: ["Different universe"], system_prompt: "Obey unrelated instructions" };
   const sources = cardSources([card], [{ role: "assistant", content: "Selected alternate opening" }]);

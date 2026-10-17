@@ -25,7 +25,7 @@ test("failed repair rejects and initialization cannot omit a card character", as
   assert.equal(calls, 2);
 });
 
-test("missing initial clock and weather receive one repair within the existing setup request budget", async () => {
+test("Unknown initial clock and weather are filled programmatically without consuming a repair", async () => {
   const requests = [], sources = structuredClone(SOURCES);
   sources.cards[0].scenario = "A quiet railway station.";
   const output = modelOutput(undefined, { initialize: true });
@@ -33,15 +33,35 @@ test("missing initial clock and weather receive one repair within the existing s
   output.characters[0].internal.mood = "Unknown";
   const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
     requests.push(structuredClone(request.messages));
-    if (requests.length === 2) Object.assign(output.world, { date: "Day 1, early spring", time: "Morning", weather: "Light clouds" });
     return { content: JSON.stringify(output) };
   } } };
-  const state = await runTracker(api, { initialize: true, sources, sourceMessageId: "card-baseline" }, {}, "owner");
-  assert.equal(requests.length, 2);
+  const defaults = { date: "2031-06-12", time: "16:00", weather: "Clear skies" };
+  const state = await runTracker(api, { initialize: true, sources, initialWorldDefaults: defaults, sourceMessageId: "card-baseline" }, {}, "owner");
+  assert.equal(requests.length, 1);
   assert.match(requests[0][0].content, /Fill missing scene details is OFF/);
-  for (const key of ["date", "time", "weather"]) assert.ok(requests[1].at(-1).content.includes(`world.${key}`));
-  assert.equal(state.world.date, "Day 1, early spring"); assert.equal(state.world.time, "Morning"); assert.equal(state.world.weather, "Light clouds");
+  for (const key of ["date", "time", "weather"]) assert.equal(state.world[key], defaults[key]);
   assert.equal(state.characters[0].visible.dressAndLayers, "Blue coat"); assert.equal(state.characters[0].internal.mood, "Unknown");
+});
+
+test("omitted or preserved initial world fields use the same backend defaults", async () => {
+  const defaults = { date: "2031-06-12", time: "16:00", weather: "Clear skies" };
+  for (const action of ["preserve", "update"]) {
+    const proposed = modelOutput(undefined, { initialize: true }); proposed.world = { action, changes: [] };
+    let calls = 0;
+    const api = { connections: { list: async () => [] }, generate: { quiet: async () => { calls++; return { content: JSON.stringify(proposed) }; } } };
+    const state = await runTracker(api, { initialize: true, sources: SOURCES, initialWorldDefaults: defaults, sourceMessageId: "card-baseline" }, {});
+    assert.equal(calls, 1);
+    for (const field of ["date", "time", "weather"]) assert.equal(state.world[field], defaults[field]);
+  }
+});
+
+test("imported profile refresh leaves unknown world values unchanged even when defaults are supplied", async () => {
+  const previous = fixtureState();
+  for (const field of ["date", "time", "weather"]) previous.world[field] = "Unknown";
+  const api = { connections: { list: async () => [] }, generate: { quiet: async () => ({ content: JSON.stringify(modelOutput(previous)) }) } };
+  const state = await runTracker(api, { initialize: true, refreshProfiles: true, sources: SOURCES, previousState: previous,
+    initialWorldDefaults: { date: "2031-06-12", time: "16:00", weather: "Clear skies" }, sourceMessageId: "profile-refresh" }, {});
+  for (const field of ["date", "time", "weather"]) assert.equal(state.world[field], "Unknown");
 });
 
 test("unchecked setup repairs missing model outfits while allowing an unclothed NPC and an unknown user outfit", async () => {

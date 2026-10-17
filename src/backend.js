@@ -5,6 +5,7 @@ import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializat
 import { DEFAULT_CONFIG, normalizeConfig, runTracker, recoverSetupPreview } from "./tracker.js";
 import { TRACKER_CONTRACT_VERSION } from "./protocol.js";
 import { buildVisualContext } from "./context.js";
+import { createInitialWorldDefaults } from "./clock.js";
 
 export function createStoryEngine(api) {
   const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map();
@@ -279,7 +280,12 @@ export function createStoryEngine(api) {
       if (setupRun && store.baseline) await setupStage(store, "ready", userId);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
       if (!store.baseline) {
+        if (store.initialWorldDefaults?.sourceFingerprint !== store.sourceFingerprint) {
+          store.initialWorldDefaults = { sourceFingerprint: store.sourceFingerprint, values: createInitialWorldDefaults() };
+          await saveStore(store);
+        }
         const baseline = await runTracker(api, { initialize: true, sources: store.sources, fillMissingSceneDetails: store.fillMissingSceneDetails,
+          initialWorldDefaults: store.initialWorldDefaults.values,
           sourceMessageId: "card-baseline", remainingMs: remaining(), onDiagnostic: captureDiagnostics,
           onSetupPreview: async preview => {
             store.setupDraft = { ...preview, sourceFingerprint: store.sourceFingerprint, capturedAt: Date.now() };

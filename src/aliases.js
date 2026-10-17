@@ -1,5 +1,6 @@
 import { TRACKER_OUTPUT_JSON_SCHEMA, validateTrackerRecord, cloneEmptyState, partialTrackerPreview } from "./schemas.js";
 import { TRACKER_COLLECTIONS, TrackerValidationError, expandTrackerRecord, trackerPatchRecordSchema } from "./protocol.js";
+import { applyInitialWorldDefaults } from "./clock.js";
 
 const ALIAS_LIMITS = { characters: 24, places: 32, relationships: 48, objectives: 12 };
 const opaqueId = value => /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value) || value.length >= 16 && /\d/.test(value) && !/\s/.test(value);
@@ -130,7 +131,7 @@ export function aliasOutputSchema(registry, { allowedUpdateIds, patches = false 
   return schema;
 }
 
-export function decodeModelOutput(output, registry, { sourceMessageId = "card-baseline", requireInitialScene = false } = {}) {
+export function decodeModelOutput(output, registry, { sourceMessageId = "card-baseline", requireInitialScene = false, initialWorldDefaults = null } = {}) {
   if (!output || typeof output !== "object" || Array.isArray(output)) throw new Error("Tracker must return a JSON object");
   if (output.schemaVersion !== 2) throw new Error("Tracker object must have schemaVersion 2");
   if (Object.keys(output).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Tracker object has unexpected root fields");
@@ -145,6 +146,7 @@ export function decodeModelOutput(output, registry, { sourceMessageId = "card-ba
     if (!decoded.world || typeof decoded.world !== "object" || Array.isArray(decoded.world)) throw new Error("world must be an object");
     const { sourceMessageId: ignored, ...priorWorld } = registry.previousState?.world ?? cloneEmptyState().world;
     decoded.world = expandTrackerRecord(decoded.world, "world", priorWorld);
+    if (requireInitialScene && initialWorldDefaults) decoded.world = applyInitialWorldDefaults(decoded.world, initialWorldDefaults);
     decoded.world = validateTrackerRecord(decoded.world, "world", "world");
   } catch (error) { issue("world", 0, "world", "world", error); }
   // Validate identities first. A creation reference must have its own declared record.

@@ -1,3 +1,10 @@
+# 1.6.3
+
+- Fill unresolved initial date, time and weather in backend code, including Unknown, omitted and preserved-without-a-value responses. These fields no longer depend on the model following the scene-default policy or consume the single repair attempt.
+- Save random fictional defaults before generation and reuse them for repair, explicit retry and worker restarts with the same sources. Extracted known, partial and fictional-calendar values take precedence. Successful canonical values travel through ordinary checkpoints, forks and portable setups.
+- Keep routine updates, imported profile refresh, existing saved scenes, clothing rules and invalid-clock validation unchanged. No extra model call or canonical/portable schema change; tracker contract is now 6.
+- Add regressions for always-Unknown model responses, omission/preserve, repair plus references/outfits, failed-setup retry, restart/reprocess/export/import, source-bound metadata validation and imported refresh.
+
 # 1.6.2
 
 - Keep initialization failure stages, stopped timing and diagnostic details in the drawer. Inline chat controls show a green profile-created bar when validated profiles exist, with a reminder to complete setup in Story Continuity; failures before extraction show a neutral paused message.
