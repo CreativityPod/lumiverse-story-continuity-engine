@@ -55,6 +55,7 @@ export function setup(ctx) {
     .sce-setup-choice{display:grid;gap:6px;flex:1 1 200px;justify-items:center;text-align:center}.sce-setup-choice .sce-button{justify-self:center}.sce-setup-choice .sce-hint{max-width:27ch}
     .sce-scene-options{display:grid;gap:6px;font-size:.76rem}.sce-scene-options input{accent-color:var(--lumiverse-primary)}.sce-setup-choice .sce-scene-options{margin-top:6px;justify-items:center}.sce-setup-choice .sce-check{text-align:left}
     .sce-setup-progress{display:grid;gap:7px;padding:12px;border:1px solid var(--lumiverse-border);border-left:3px solid var(--lumiverse-primary);border-radius:8px;text-align:left;font-size:.78rem}.sce-setup-progress[data-status="failed"]{border-left-color:var(--lumiverse-warning,#c89b62)}.sce-setup-progress[data-status="ready"]{border-left-color:var(--lumiverse-success,#10b981)}
+    .sce-inline-setup .sce-setup-progress[data-status="profile"]{border-color:var(--lumiverse-success,#10b981);background:rgba(16,185,129,.08);background:color-mix(in srgb,var(--lumiverse-success,#10b981) 10%,transparent)}.sce-inline-setup .sce-setup-progress[data-status="paused"]{border-left-color:var(--lumiverse-border)}
     .sce-progress-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}.sce-progress-error{margin:8px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.72rem;line-height:1.5;max-height:220px;overflow:auto}.sce-setup-progress summary{cursor:pointer;font-size:.76rem}
   `);
   cleanups.push(removeStyle);
@@ -80,7 +81,18 @@ export function setup(ctx) {
   function renderSetupProgress() {
     const progress = latestStatus?.setupProgress;
     for (const view of [drawerProgress, inlineSetup?.progress].filter(Boolean)) {
+      const inlinePaused = view === inlineSetup?.progress && (progress?.status === "failed" || !progress && latestStatus?.code === "degraded");
+      if (inlinePaused) {
+        const profiles = latestStatus?.setupPreview?.snapshot?.characters?.length ?? 0;
+        view.root.hidden = !activeChatId;
+        view.root.dataset.status = profiles ? "profile" : "paused";
+        view.label.textContent = profiles ? `Character profile${profiles === 1 ? "" : "s"} created. Complete setup in Story Continuity.` : "Setup paused. Open Story Continuity when ready.";
+        view.elapsed.hidden = true; view.elapsed.textContent = "";
+        view.details.hidden = true; view.details.open = false; view.error.textContent = "";
+        continue;
+      }
       view.root.hidden = !progress || !activeChatId;
+      view.elapsed.hidden = false;
       if (!progress) continue;
       const label = progress.stage === "validating" && progress.attempt === 2 ? "Validating repaired response" : SETUP_STAGE_TEXT[progress.stage] ?? SETUP_STAGE_TEXT.setup;
       view.label.textContent = progress.status === "failed" ? `Failed while ${label.toLowerCase()}` : progress.status === "ready" ? SETUP_STAGE_TEXT.ready : `${label}…`;
@@ -99,7 +111,7 @@ export function setup(ctx) {
     const duration = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
     const text = !progress.startedAt ? "Elapsed time unavailable" : progress.status === "running" ? `${duration} elapsed`
       : progress.status === "ready" ? `Completed in ${duration}` : progress.interrupted ? `Last update after ${duration}` : `Stopped after ${duration}`;
-    for (const view of [drawerProgress, inlineSetup?.progress].filter(Boolean)) view.elapsed.textContent = text;
+    for (const view of [drawerProgress, inlineSetup?.progress].filter(Boolean)) if (!view.elapsed.hidden) view.elapsed.textContent = text;
   }
   function stopProgressTimer() { if (progressTimer !== null) clearInterval(progressTimer); progressTimer = null; }
   function syncProgressTimer() {
@@ -247,8 +259,7 @@ export function setup(ctx) {
       inlineSetup.create.textContent = createButton.textContent;
       inlineSetup.create.disabled = createButton.disabled; inlineSetup.import.disabled = importButton.disabled;
       inlineSetup.sceneOptions.input.checked = fillMissingSceneDetails; inlineSetup.sceneOptions.input.disabled = createButton.disabled;
-      inlineSetup.feedback.textContent = latestStatus?.setupProgress ? "" : startupFeedback || (latestStatus?.processing ? "Preparing profiles and starting state…"
-        : latestStatus?.code === "degraded" ? "Setup failed. Try again or open Story Continuity for details."
+      inlineSetup.feedback.textContent = latestStatus?.setupProgress || latestStatus?.code === "degraded" ? "" : startupFeedback || (latestStatus?.processing ? "Preparing profiles and starting state…"
         : latestStatus?.canCreate && !latestStatus.canImport ? "To import, open a fresh chat before sending a message." : "");
     }
   }
@@ -362,7 +373,7 @@ export function setup(ctx) {
     setupFeedback.textContent = !payload.ok && pending.kind === "create" && latestStatus?.setupProgress?.status === "failed"
       ? "Setup stopped. Expand error details, then select Retry Setup when ready." : payload.message;
     updateButtons();
-    startupFeedback = payload.ok ? "" : "Setup could not be completed. Open Story Continuity for details."; updateButtons();
+    startupFeedback = payload.ok ? "" : "Open Story Continuity to continue setup."; updateButtons();
     if (!payload.ok || !payload.fileText) { requestStatus(); return; }
     if (pending.picker) {
       try {

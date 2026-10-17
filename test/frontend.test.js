@@ -217,13 +217,14 @@ test("backend setup status restores progress and retry controls", () => {
     assert.ok(bubble.textContent.includes("Preparing profiles and starting state"));
     assert.ok([...bubble.querySelectorAll("button")].every(button => button.disabled));
     showStartup(h, { code: "degraded", text: "PRIVATE_DIAGNOSTIC", processing: false });
-    assert.ok(bubble.textContent.includes("Setup failed. Try again"));
+    assert.ok(bubble.textContent.includes("Setup paused. Open Story Continuity when ready."));
+    assert.ok(!bubble.textContent.includes("profile created"));
     assert.ok(!bubble.textContent.includes("PRIVATE_DIAGNOSTIC"));
     assert.ok([...bubble.querySelectorAll("button")].every(button => !button.disabled));
   } finally { h.restore(); }
 });
 
-test("setup stages show elapsed time, keep errors expandable, and stop timers on completion and navigation", t => {
+test("inline setup keeps failures quiet while drawer details, retry and progress timers remain available", t => {
   let now = 100000, sequence = 0; const intervals = new Map();
   t.mock.method(Date, "now", () => now);
   t.mock.method(globalThis, "setInterval", callback => { intervals.set(++sequence, callback); return sequence; });
@@ -242,10 +243,21 @@ test("setup stages show elapsed time, keep errors expandable, and stop timers on
     assert.ok(inline.textContent.includes("Repairing rejected output")); assert.equal(intervals.size, 1);
     const failure = { ...progress, status: "failed", stage: "validating", attempt: 2, elapsedMs: 12000, finishedAt: now, error: 'Invalid outfit <img src="x" onerror="alert(1)">' };
     showStartup(h, { code: "degraded", setupProgress: failure });
-    const details = inline.querySelector('details');
-    assert.ok(inline.textContent.includes("Failed while validating repaired response")); assert.equal(details.open, false); assert.equal(details.hidden, false);
-    assert.equal(inline.querySelector('img'), null); assert.equal(intervals.size, 0);
+    const details = drawer.querySelector('details'), inlineDetails = inline.querySelector('details');
+    assert.ok(inline.textContent.includes("Setup paused. Open Story Continuity when ready."));
+    assert.equal(inline.dataset.status, "paused"); assert.equal(inlineDetails.hidden, true);
+    assert.equal(inline.querySelector('[aria-label="Elapsed setup time"]').hidden, true);
+    assert.equal(inline.querySelector('pre').textContent, "");
+    assert.ok(!inline.textContent.includes("Failed while")); assert.ok(!inline.textContent.includes("Invalid outfit"));
+    assert.ok(drawer.textContent.includes("Failed while validating repaired response")); assert.equal(details.open, false); assert.equal(details.hidden, false);
+    assert.equal(drawer.querySelector('img'), null); assert.equal(intervals.size, 0);
     details.open = true; showStartup(h, { code: "degraded", setupProgress: failure }); assert.equal(details.open, true);
+    showStartup(h, { code: "degraded", setupProgress: failure, config: { showStatusWidget: true }, setupPreview: { snapshot: publicTrackerSnapshot(fixtureState()), unavailableFields: ["world.sceneStatus"] } });
+    assert.equal(inline.dataset.status, "profile");
+    assert.ok(inline.textContent.includes("Character profile created. Complete setup in Story Continuity."));
+    assert.ok(!bubble.textContent.includes("Failed while")); assert.ok(!bubble.textContent.includes("Invalid outfit"));
+    assert.equal(inlineDetails.hidden, true); assert.equal(details.open, true);
+    assert.equal(h.widgets.at(-1).root.querySelector('button').dataset.state, "attention");
     assert.equal(h.button("Retry Setup").disabled, false); h.button("Retry Setup").click();
     const retry = h.sent.at(-1); assert.equal(retry.type, "story_create_setup"); assert.equal(retry.chatId, "chat");
     h.backend({ type: "story_setup_result", chatId: "chat", requestId: retry.requestId, ok: false, message: failure.error });
@@ -253,6 +265,7 @@ test("setup stages show elapsed time, keep errors expandable, and stop timers on
     now += 1000;
     showStartup(h, { code: "processing", processing: true, canCreate: false, setupProgress: { ...progress, stage: "reading", startedAt: now, elapsedMs: 0 } });
     assert.equal(details.open, false); assert.equal(details.hidden, true); assert.equal(inline.querySelector('pre').textContent, "");
+    assert.equal(inline.dataset.status, "running"); assert.equal(inline.querySelector('[aria-label="Elapsed setup time"]').hidden, false);
     h.status({ canCreate: false, setupTargetMessageId: null, setupProgress: { ...progress, status: "ready", stage: "ready", elapsedMs: 20000, finishedAt: now } });
     assert.equal(bubble.querySelector('.sce-setup-progress'), null); assert.ok(drawer.textContent.includes("Initial setup ready"));
     assert.equal(drawer.querySelector('[aria-label="Elapsed setup time"]').textContent, "Completed in 20s"); assert.equal(intervals.size, 0);

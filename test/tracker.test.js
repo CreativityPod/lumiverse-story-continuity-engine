@@ -96,6 +96,7 @@ test("routine requests use extracted profiles and exclude raw cards while initia
   const sources = structuredClone(SOURCES); sources.cards[0].description += " RAW_CARD_ONLY_SENTINEL."; sources.cards[0].exampleDialogue = "EXAMPLE_ONLY_SENTINEL"; sources.selectedOpening = "OPENING_ONLY_SENTINEL";
   const previous = fixtureState(); previous.characters[0].profile.relationshipContext = "Longstanding station partnership"; previous.characters[0].profile.boundaries = "Do not open the private locker";
   previous.characters[0].visible.dressAndLayers = "Unknown";
+  for (const field of ["date", "time", "weather"]) previous.world[field] = "Unknown";
   const requests = [], api = { connections: { list: async () => [] }, generate: { quiet: async input => {
     requests.push(input); const initialize = input.messages[1].content.startsWith("INITIALIZE");
     return { content: JSON.stringify(modelOutput(initialize ? fixtureState() : previous, { initialize })) };
@@ -103,9 +104,11 @@ test("routine requests use extracted profiles and exclude raw cards while initia
   await runTracker(api, { initialize: true, sources, sourceMessageId: "card-baseline" }, {}, "owner");
   const next = await runTracker(api, { sources, previousState: previous, userText: "Hello", assistantText: "Ada nods.", sourceMessageId: "a1" }, {}, "owner");
   assert.equal(next.characters[0].visible.dressAndLayers, "Unknown"); assert.equal(requests.length, 2);
+  for (const field of ["date", "time", "weather"]) assert.equal(next.world[field], "Unknown");
   const initial = requests[0].messages[1].content, routine = requests[1].messages[1].content;
   for (const sentinel of ["RAW_CARD_ONLY_SENTINEL", "EXAMPLE_ONLY_SENTINEL", "OPENING_ONLY_SENTINEL"]) { assert.ok(initial.includes(sentinel)); assert.ok(!routine.includes(sentinel)); }
   assert.ok(routine.includes("Longstanding station partnership")); assert.ok(routine.includes("Do not open the private locker"));
+  assert.match(initial, /INITIAL SETUP OUTPUT CHECKLIST/); assert.ok(!routine.includes("INITIAL SETUP OUTPUT CHECKLIST"));
 });
 
 test("provider formats and initialization/routine/refresh requests carry the alias contract", async () => {

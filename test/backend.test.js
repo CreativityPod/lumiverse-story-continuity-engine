@@ -100,6 +100,30 @@ test("initial world failure displays validated profiles across restart without c
   assert.equal((await restarted.loadStore("chat")).setupDraft, null);
 });
 
+test("reference-only setup repair cannot commit missing defaults and Retry preserves the original chat", async () => {
+  const h = harness(), initial = modelOutput(undefined, { initialize: true }), original = structuredClone(h.messages.get("chat"));
+  for (const field of ["date", "time", "weather"]) initial.world[field] = "Unknown";
+  initial.characters[0].visible.dressAndLayers = "Unknown";
+  initial.relationships.push({ id: "new_r1", action: "update", changes: [{ field: "fromId", value: "c1" }, { field: "toId", value: "new_u1" }] });
+  const referenceOnlyRepair = { schemaVersion: 2, world: { action: "preserve", changes: [] },
+    characters: [{ id: "new_u1", action: "update", changes: [{ field: "name", value: "User" }] }],
+    relationships: [{ id: "new_r1", action: "update", changes: [{ field: "toId", value: "new_u1" }] }], places: [], objectives: [] };
+  h.setResponse(async () => ({ content: JSON.stringify(h.requests.length === 1 ? initial : referenceOnlyRepair), finish_reason: "stop" }));
+  await h.select(); assert.equal(h.requests.length, 2);
+  const failed = await h.engine.loadStore("chat");
+  assert.equal(failed.baseline, null); assert.equal(failed.current, null); assert.deepEqual(failed.checkpoints, {});
+  assert.equal(failed.setupDraft.state.characters[0].profile.identity, "Mechanic");
+  assert.equal(failed.trackerDiagnostics.attempts[0].issues.length, 5);
+  for (const field of ["world.date", "world.time", "world.weather"]) assert.ok(failed.setupDraft.unavailableFields.includes(field));
+  assert.equal(h.variables.get(`chat:${CHAT_KEYS.visual}`), ""); assert.deepEqual(h.messages.get("chat"), original);
+  const restarted = createStoryEngine(h.api); h.setResponse(null);
+  await restarted.schedule("chat", {}, "owner"); assert.equal(h.requests.length, 2);
+  await restarted.handleFrontend({ type: "story_create_setup", chatId: "chat", requestId: "retry-incomplete" }, "owner");
+  assert.equal(h.requests.length, 3); assert.equal((await restarted.loadStore("chat")).current.characters[0].name, "Ada");
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /DRESS & LAYERS: Blue coat/);
+  assert.deepEqual(h.messages.get("chat"), original);
+});
+
 test("v1.5.3 failed setup evidence can restore a preview locally without running generation", async () => {
   const h = harness(), response = modelOutput(undefined, { initialize: true }); response.world.sceneStatus = "in_progress";
   h.setResponse(async () => ({ content: JSON.stringify(response), finish_reason: "stop" })); await h.select();

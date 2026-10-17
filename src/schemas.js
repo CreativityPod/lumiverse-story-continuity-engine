@@ -95,9 +95,10 @@ export function partialTrackerPreview(decoded, issues, previousState, sourceMess
     if (key === "action") continue;
     try { root.world[key] = validateNode(decoded.world?.[key], schema, `world.${key}`); }
     catch { root.world[key] = previous.world[key]; unavailableFields.push(`world.${key}`); }
+    if (issues.some(issue => issue.code === "missing_initial_value" && issue.path === `world.${key}`) && !unavailableFields.includes(`world.${key}`)) unavailableFields.push(`world.${key}`);
   }
   for (const kind of ["characters", "relationships", "places", "objectives"]) root[kind] = (Array.isArray(decoded[kind]) ? decoded[kind] : [])
-    .filter((entry, index) => !issues.some(issue => issue.kind === kind && issue.index === index || issue.kind === kind && issue.index === -1));
+    .filter((entry, index) => !issues.some(issue => issue.code !== "missing_initial_value" && issue.kind === kind && (issue.index === index || issue.index === -1)));
   const characters = new Set([...previous.characters, ...root.characters].map(entry => entry.id));
   root.relationships = root.relationships.filter(entry => characters.has(entry.fromId) && characters.has(entry.toId) && entry.fromId !== entry.toId);
   root.objectives = root.objectives.filter(entry => characters.has(entry.ownerId));

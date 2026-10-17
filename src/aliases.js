@@ -130,7 +130,7 @@ export function aliasOutputSchema(registry, { allowedUpdateIds, patches = false 
   return schema;
 }
 
-export function decodeModelOutput(output, registry, { sourceMessageId = "card-baseline" } = {}) {
+export function decodeModelOutput(output, registry, { sourceMessageId = "card-baseline", requireInitialScene = false } = {}) {
   if (!output || typeof output !== "object" || Array.isArray(output)) throw new Error("Tracker must return a JSON object");
   if (output.schemaVersion !== 2) throw new Error("Tracker object must have schemaVersion 2");
   if (Object.keys(output).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Tracker object has unexpected root fields");
@@ -209,6 +209,22 @@ export function decodeModelOutput(output, registry, { sourceMessageId = "card-ba
     }
     for (const field of kind === "relationships" ? ["fromId", "toId"] : ["ownerId"]) entry[field] = resolveCharacter(entry[field], `${kind}[${index}].${field}`, kind, index, recordId);
     if (kind === "relationships" && entry.fromId === entry.toId) issue(kind, index, recordId, `${kind}[${index}]`, "Relationship references must identify two different established characters");
+  }
+  // These requirements must join reference/record errors BEFORE the single
+  // repair is requested. Otherwise repairing a dangling reference can reveal
+  // missing starting values only after the repair budget has already been used.
+  if (requireInitialScene) {
+    const missing = value => typeof value === "string" && /^unknown\.?$/i.test(value.trim());
+    for (const field of ["date", "time", "weather"]) if (missing(decoded.world?.[field])) {
+      issue("world", 0, "world", `world.${field}`, `Initial scene requires world.${field}; preserve the source value or choose a compatible fictional starting default under the initialization-only policy`, "missing_initial_value");
+    }
+    if (Array.isArray(decoded.characters)) for (const [index, char] of decoded.characters.entries()) {
+      if (issues.some(error => error.kind === "characters" && (error.index === index || error.index === -1))) continue;
+      if (char.controller === "model" && missing(char.visible?.dressAndLayers)) {
+        issue("characters", index, output.characters[index].id.trim(), `characters[${index}].visible.dressAndLayers`,
+          `Initial scene requires visible.dressAndLayers for ${JSON.stringify(char.name)}; preserve source clothing or choose a compatible starting outfit, including an explicit clothing condition when an outfit does not apply. Never choose the user's outfit`, "missing_initial_value");
+      }
+    }
   }
   if (issues.length) {
     const error = new TrackerValidationError(issues);

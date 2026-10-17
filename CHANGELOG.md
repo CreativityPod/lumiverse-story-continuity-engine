@@ -1,3 +1,17 @@
+# 1.6.2
+
+- Keep initialization failure stages, stopped timing and diagnostic details in the drawer. Inline chat controls show a green profile-created bar when validated profiles exist, with a reminder to complete setup in Story Continuity; failures before extraction show a neutral paused message.
+- Preserve the red widget attention marker, drawer diagnostics and explicit Retry Setup. Running progress/timing returns on retry; no transcript message, model call or saved-state change is added.
+- Update the frontend lifecycle regression for profile/no-profile notices, drawer-only error details, widget attention and retry timing.
+
+# 1.6.1
+
+- Fix initialization validation order: report missing required starting date/time/weather and model-character outfits alongside reference/record errors before using the single repair. Previously, a repair could fix an undeclared user reference and only then discover the missing defaults, leaving no repair attempt available.
+- Use field-specific targeted corrections that retain extracted profiles, appearance and other valid facts. Keep repaired records in their original cast/collection order and append only new declarations.
+- Add an explicit initialization output checklist separating required starting defaults from optional grooming, mood and atmosphere. Routine tracking and imported profile refresh retain their no-invention rules.
+- Preserve validated profiles as incomplete previews when starting defaults are missing; mark missing world defaults unavailable. Incomplete repair cannot commit or populate macros, and explicit Retry Setup remains required after failure.
+- Reproduce the reported reference-plus-missing-defaults sequence, verify a single combined repair, user-state protection, preview/restart/retry behavior and phase-specific policy. Internal tracker contract is now 5; canonical schema, saved setups, labeled injection and the visual macro remain compatible.
+
 # 1.6.0
 
 - Render selected roleplay continuity as labeled scene, appearance/clothing, private character context, relationships, commitments and place sections. Keep canonical/tracker JSON and persistent identities unchanged; retain aliases and whole-value omission under a 24,000-character rendered-text budget.

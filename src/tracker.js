@@ -25,7 +25,7 @@ Track each model character's mood, immediate intent, knowledge, beliefs, and con
 visible contains only established observable appearance, clothing/layers, physical condition, position, activity, and items. Do not include secret affiliations, motives, thoughts, private history, or hidden knowledge in visible fields, public relationship status, place descriptions, or world context. Outside the explicit initialization policy, unknown clothing stays Unknown. Preserve item ownership, layering, injuries, contact, and positions until changed by a canonical cause.
 world.date and world.time are the fictional narrative clock, never wall-clock time. Ignore message timestamps, real response delay, and generation latency. When an exact Gregorian date including its year is established, record YYYY-MM-DD; record an exact local time as 24-hour HH:mm (include seconds only when established and relevant). Preserve approximate or partial values such as late afternoon, October 13, Day 2 or a fictional calendar; never invent a missing year, calendar, timezone, minute or second. Advance only by completed fictional action or stated elapsed time. Resolve supported elapsed durations against the saved clock, carrying midnight, month and year rollovers into world.date in the same update. For example, 2031-12-31 at 23:50 plus an explicitly elapsed 20 minutes becomes 2032-01-01 at 00:10. Preserve uncertainty when a duration or starting instant is approximate. A new date alone does not imply a new time; a new time alone must not silently reset the date. On initialization or a selected opening, record the starting clock without advancing it again. Observation, analysis and real waiting do not advance time. Weather changes only when the narrative supports it.
 Preserve recurring place descriptions and physical changes such as an unlocked door. Keep private place facts separate. Relationships reference supplied character aliases. Objectives have an established character owner, timing, and active/completed/abandoned status; completed objectives do not become new plans. When an objective's relative deadline can be resolved exactly against the established fictional clock, include that date/time in timing; otherwise retain the relative or approximate wording.
-On initialization return the full compact state. On routine updates return only selected entities and any new directly established entities; other saved entities are preserved by the backend. The identity catalog marks existing aliases with canUpdate. Entries with canUpdate false are reference-only: use them for identity lookup and character cross-references, but omit their entity records from the output. Never recreate an existing identity through a creation alias. All root collections remain required but may be empty; an empty collection does not delete saved records. Use action preserve for an existing unchanged section/entity and update for new or changed facts. New entities require update. Never return sourceMessageId; the backend owns provenance. No additional fields, prose, markdown, or comments.
+On initialization there is no saved baseline: explicitly extract supported facts and the required starting values as action update field changes. During routine tracking return only selected entities and any new directly established entities; other saved entities are preserved by the backend. The identity catalog marks existing aliases with canUpdate. Entries with canUpdate false are reference-only: use them for identity lookup and character cross-references, but omit their entity records from the output. Never recreate an existing identity through a creation alias. All root collections remain required but may be empty; an empty collection does not delete saved records. Use action preserve for an existing unchanged section/entity and update for new or changed facts. New entities require update. Never return sourceMessageId; the backend owns provenance. No additional fields, prose, markdown, or comments.
 Example dialogue and creator notes are characterization guidance, not completed events. Alternate greetings are mutually exclusive and must not be merged. The actual selected opening overrides a default greeting. Lore is reference material, not evidence that described events already happened.
 Return exactly the JSON shape in the request's supplied schema.
 The response uses compact change records: {id,action,changes:[{field,value}]}; world uses {action,changes}. Fields use the exact paths enumerated in the schema, such as visible.dressAndLayers or profile.preferences. Values are strings. Omit unchanged entities and unchanged fields; omitted changes preserve established facts. For preserve use an empty changes array. Do not copy full profiles. During initialization include every card character and extract all supported profile/appearance/scene facts; unestablished fields are filled with Unknown by the backend. On routine updates include only supported changes. New NPC/user declarations need their supplied creation alias, action update and a name change; unsupported biography, appearance and internal fields need not be supplied. The backend assigns role/controller. A creation slot listed in the catalog is NOT an existing character. Declare every referenced new character in characters in this same response. Never put Unknown, a name, user, or a place alias into an identity-reference field. If the user has no established name, use the neutral label User when explicitly declaring the user character.`;
@@ -147,16 +147,22 @@ function mergeTrackerRepair(original, repaired, plan, registry) {
     const ids = replacements.map(entry => typeof entry?.id === "string" ? entry.id.trim() : null);
     if (new Set(ids).size !== ids.length || ids.includes(null)) throw new Error(`Repair ${kind} has invalid or duplicate aliases`);
     for (const id of targets[kind]) if (!ids.includes(id)) throw new Error(`Repair omitted rejected ${kind} record ${id}; correct it explicitly rather than dropping it`);
-    const retained = (merged[kind] ?? []).filter(entry => !targets[kind].has(entry.id?.trim()));
-    const retainedIds = new Set(retained.map(entry => entry.id?.trim()));
+    const originalRecords = merged[kind] ?? [], originalIds = new Set(originalRecords.map(entry => entry.id?.trim()));
+    const replacementsById = new Map(replacements.map(entry => [entry.id.trim(), entry]));
+    // Replace in place: moving repaired records to the end would reorder the
+    // saved cast and could renumber NPC/user aliases on the next request.
+    const retained = originalRecords.map(entry => {
+      const id = entry.id?.trim();
+      return targets[kind].has(id) ? replaceRecord(entry, replacementsById.get(id), kind, id) : entry;
+    });
     // Already validated records are frozen. New declarations may supply missing
     // dependencies; all merged references are validated again before commit.
     for (const entry of replacements) {
       const id = entry.id.trim();
       const identity = registry.reverse.get(id) ?? registry.creation.get(id);
       if (!identity || identity.kind !== kind) throw new Error(`Repair ${kind} contains an unknown or wrong-type alias ${JSON.stringify(id)}`);
-      if (targets[kind].has(id)) retained.push(replaceRecord(original[kind].find(candidate => candidate.id?.trim() === id), entry, kind, id));
-      else if (!retainedIds.has(id) && registry.creation.get(id)?.kind === kind) retained.push(entry);
+      if (targets[kind].has(id) && !originalIds.has(id)) retained.push(replaceRecord(undefined, entry, kind, id));
+      else if (!originalIds.has(id) && registry.creation.get(id)?.kind === kind) retained.push(entry);
     }
     merged[kind] = retained;
   }
@@ -197,8 +203,9 @@ export async function runTracker(api, input, rawConfig, userId) {
       : `INITIALIZE FROM CARD SOURCES. Extract the stable profiles, appearance, initial internal state, recurring characters, and opening scene. Include every card character with its supplied c alias. Do not invent a user profile.\n${JSON.stringify(encodeModelSources(input.sources, registry))}`
     : `PREVIOUS SELECTED PRIVATE STATE (includes extracted stable profiles; omitted entities remain saved)\n${JSON.stringify(encodeModelState(routine.state, registry))}\nTARGETED ORIGINAL SOURCE REFERENCES (only relevant facts not covered by extracted profiles; current state takes precedence)\n${JSON.stringify(encodeModelReferences(routine.references, registry))}\nCOMPLETED USER TURN\n${registry.rewriteText(input.userText || "[none]")}\nCOMPLETED ASSISTANT TURN${input.isOpening ? " (selected opening; do not advance its starting clock again)" : ""}\n${registry.rewriteText(input.assistantText)}`;
   const scenePolicy = input.initialize && !input.refreshProfiles ? initialScenePolicy(input.fillMissingSceneDetails === true) : "";
+  const setupChecklist = scenePolicy ? `\nINITIAL SETUP OUTPUT CHECKLIST: This is initialization, not a routine delta. Explicitly include non-Unknown changes for world.date, world.time and world.weather, plus visible.dressAndLayers for every model-controlled character you declare. Preserve source-established values; choose compatible missing starting values under INITIAL SCENE DEFAULTS. This initialization-only exception overrides the generic Unknown/no-invention rule for exactly those starting fields, including a newly chosen clock minute. The optional scene-details checkbox controls only grooming, mild mood and atmosphere; it does not disable these required starting values. Never choose user-controlled clothing or internal state. Include all supported profile and appearance facts as well. Omitted initial changes become Unknown locally, not an implicit extraction from the card. Required card records: ${JSON.stringify((input.sources.cards ?? []).map(card => ({ id: registry.aliasFor("characters", `char:${card.id}`), name: card.name, requiredChanges: ["visible.dressAndLayers"] })))}. Declare any referenced new user/NPC in characters in this same response.` : "";
   const choices = "CONTROLLED VALUES: world sceneStatus must be active or ended (active for an ongoing/opening scene; ended only when the scene explicitly ends). Objective status must be active, completed or abandoned. Never use Unknown or a description for these status fields; omit an unsupported change instead. Character role/controller come from the supplied identity.";
-  const messages = [{ role: "system", content: `${TRACKER_SYSTEM_PROMPT}\n${choices}${scenePolicy ? `\n${scenePolicy}` : ""}\nRETURN SCHEMA\n${JSON.stringify(schema)}` }, { role: "user", content: `${content}\n${catalog}` }];
+  const messages = [{ role: "system", content: `${TRACKER_SYSTEM_PROMPT}\n${choices}${scenePolicy ? `\n${scenePolicy}` : ""}\nRETURN SCHEMA\n${JSON.stringify(schema)}` }, { role: "user", content: `${content}\n${catalog}${setupChecklist}` }];
   // One shared deadline covers both the original attempt and its single repair.
   const signal = AbortSignal.timeout(Math.min(config.timeoutMs, input.remainingMs ?? config.timeoutMs));
   const request = attempt => {
@@ -229,16 +236,9 @@ export async function runTracker(api, input, rawConfig, userId) {
     try {
       if (inspected.message) throw new Error(inspected.message);
       if (attempt) parsed = mergeTrackerRepair(repairOriginal, parsed, repairTargets, registry);
-      const state = materializeTrackerOutput(decodeModelOutput(parsed, registry, { sourceMessageId: input.sourceMessageId }), input.previousState, input.sourceMessageId, scope);
+      const state = materializeTrackerOutput(decodeModelOutput(parsed, registry, { sourceMessageId: input.sourceMessageId, requireInitialScene: Boolean(scenePolicy) }), input.previousState, input.sourceMessageId, scope);
       candidateState = state;
       for (const card of input.sources.cards) if (!state.characters.some(char => char.id === `char:${card.id}` && char.role === "main")) throw new Error("Every card character must be recorded with its exact id and main role");
-      if (scenePolicy) {
-        const missing = ["date", "time", "weather"].filter(key => state.world[key].trim().toLowerCase() === "unknown").map(key => `world.${key}`);
-        for (const char of state.characters) if (char.controller === "model" && char.visible.dressAndLayers.trim().toLowerCase() === "unknown") {
-          missing.push(`visible.dressAndLayers for ${JSON.stringify(char.name)}`);
-        }
-        if (missing.length) throw new Error(`Initial scene requires ${missing.join(", ")}; keep source facts or choose compatible fictional starting defaults under the initial scene policy, including an explicit clothing condition when an outfit does not apply`);
-      }
       detail.category = "valid";
       await report(attempt ? "repaired" : "first_pass");
       return state;
