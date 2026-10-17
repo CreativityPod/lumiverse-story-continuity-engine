@@ -1,4 +1,4 @@
-import { TRACKER_OUTPUT_JSON_SCHEMA, validateTrackerRecord, cloneEmptyState, partialTrackerPreview } from "./schemas.js";
+import { TRACKER_SCHEMA_VERSION, TRACKER_OUTPUT_JSON_SCHEMA, validateTrackerRecord, cloneEmptyState, partialTrackerPreview } from "./schemas.js";
 import { TRACKER_COLLECTIONS, TrackerValidationError, expandTrackerRecord, trackerPatchRecordSchema } from "./protocol.js";
 import { applyInitialWorldDefaults } from "./clock.js";
 
@@ -133,7 +133,7 @@ export function aliasOutputSchema(registry, { allowedUpdateIds, patches = false 
 
 export function decodeModelOutput(output, registry, { sourceMessageId = "card-baseline", requireInitialScene = false, initialWorldDefaults = null } = {}) {
   if (!output || typeof output !== "object" || Array.isArray(output)) throw new Error("Tracker must return a JSON object");
-  if (output.schemaVersion !== 2) throw new Error("Tracker object must have schemaVersion 2");
+  if (output.schemaVersion !== TRACKER_SCHEMA_VERSION) throw new Error(`Tracker object must have schemaVersion ${TRACKER_SCHEMA_VERSION}`);
   if (Object.keys(output).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Tracker object has unexpected root fields");
   const decoded = structuredClone(output), declaredNew = new Set(), resolved = new Map(), issues = [];
   const issue = (kind, index, alias, path, error, code = "invalid_record") => issues.push({ kind, index, recordId: alias, path: error.path ?? path,

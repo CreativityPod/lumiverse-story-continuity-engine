@@ -6,7 +6,7 @@ import { normalizeInitialWorldDefaults } from "./clock.js";
 
 export const SETUP_FORMAT = "story-continuity-initial-setup";
 export const IMPORT_LOADED_TEXT = "Story setup loaded. Use Begin Story in the Story Continuity drawer when ready.";
-export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v1", visual: "story_continuity.visual_text_v1" });
+export const CHAT_KEYS = Object.freeze({ state: "story_continuity.state_v3", previousState: "story_continuity.state_v2", legacyState: "story_continuity.state_v1", public: "story_continuity.public_v2", legacyPublic: "story_continuity.public_v1", visual: "story_continuity.visual_text_v1" });
 export const MAX_SOURCE_CHARS = 96000;
 export const MAX_SETUP_BYTES = 256 * 1024;
 // Setup controls are UI only; legacy notices remain recognized for cleanup/filtering.

@@ -1,3 +1,11 @@
+# 1.7.0
+
+- Add separate text profile.age/profile.gender fields for all characters. Extract established facts from cards/openings/lore; allow descriptive ages, ranges, ageless/apparent-age wording and Unknown. Never invent these fields as scene defaults or infer them from appearance/names/stereotypes.
+- Include known AGE/GENDER in readable roleplay and visual text, with only these two profile fields whitelisted for ImageGen. Display them in the character drawer; preserve chronological/apparent-age distinctions and omit Unknown text.
+- Upgrade saved schema-v1/v2 state and portable setups locally to schema 3. Add complete state_v3 and observable public_v2 macros while retaining state_v2/state_v1/public_v1 shapes. Existing visual_text_v1 gains AGE/GENDER labels; private fields remain excluded.
+- Add Fill Missing Age / Gender for existing chats. Extract missing values from saved sources without rebuilding scenes or replaying turns; merge only still-unknown age/gender into saved snapshots and retain known facts, identity prose and provenance. Discard results on branch/source/navigation changes.
+- Extend regressions for descriptive/unknown ages, numeric-response repair, migration, legacy macros, visual privacy, drawer controls, scoped filling, restart, portable setups and forks. Tracker contract is now 8; normal initialization adds no model call.
+
 # 1.6.4
 
 - Choose wholly missing initial date, time and weather together in the existing extraction call, fitting established setting and opening constraints. Preserve source facts, partial clocks, fictional calendars and brief weather without adding missing detail.

@@ -1,6 +1,7 @@
 import { formatStoryClockValue } from "./clock.js";
 
 // Prompt-only presentation. Canonical state and the tracker protocol stay JSON.
+export const IDENTITY_LABELS = { age: "AGE", gender: "GENDER" };
 export const APPEARANCE_LABELS = { face: "FACE", eyes: "EYES", skin: "SKIN", body: "BODY TYPE & PROPORTIONS", distinguishingFeatures: "DISTINGUISHING FEATURES" };
 export const VISIBLE_LABELS = { hairAndGrooming: "HAIR & GROOMING", dressAndLayers: "DRESS & LAYERS", physicalState: "PHYSICAL STATE", position: "POSITION", activity: "ACTIVITY", items: "ITEMS" };
 const PROFILE_LABELS = { identity: "IDENTITY", background: "BACKGROUND", personality: "PERSONALITY & VOICE", preferences: "PREFERENCES", relationshipContext: "RELATIONSHIP HISTORY & AGREEMENTS", boundaries: "BOUNDARIES", privateFacts: "PRIVATE FACTS" };
@@ -20,6 +21,8 @@ export function renderContinuityContext(context, { visualOnly = false } = {}) {
   }
   for (const char of characters) {
     lines.push("", `CHARACTER ${char.id}: ${promptValue(char.name)}`);
+    const identity = promptFields(char.profile, IDENTITY_LABELS);
+    if (identity) lines.push(identity);
     if (!visualOnly) lines.push(`ROLE: ${char.role}; CONTROL: ${char.controller}`);
     const stable = promptFields(char.appearance, APPEARANCE_LABELS), visible = promptFields(char.visible, VISIBLE_LABELS);
     if (stable) lines.push(`STABLE APPEARANCE: ${stable}`);

@@ -106,7 +106,7 @@ test("reference-only setup repair cannot commit a missing outfit and Retry reuse
   for (const field of ["date", "time", "weather"]) initial.world[field] = "Unknown";
   initial.characters[0].visible.dressAndLayers = "Unknown";
   initial.relationships.push({ id: "new_r1", action: "update", changes: [{ field: "fromId", value: "c1" }, { field: "toId", value: "new_u1" }] });
-  const referenceOnlyRepair = { schemaVersion: 2, world: { action: "preserve", changes: [] },
+  const referenceOnlyRepair = { schemaVersion: 3, world: { action: "preserve", changes: [] },
     characters: [{ id: "new_u1", action: "update", changes: [{ field: "name", value: "User" }] }],
     relationships: [{ id: "new_r1", action: "update", changes: [{ field: "toId", value: "new_u1" }] }], places: [], objectives: [] };
   h.setResponse(async () => ({ content: JSON.stringify(h.requests.length === 1 ? initial : referenceOnlyRepair), finish_reason: "stop" }));
@@ -148,6 +148,110 @@ test("programmatic world defaults survive restart, reprocess and portable setup 
   await restarted.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: exported.fileText, requestId: "random-import" }, "owner");
   assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 1);
   for (const field of ["date", "time", "weather"]) assert.equal((await restarted.loadStore("chat")).current.world[field], values[field]);
+});
+
+test("filling missing age/gender preserves scenes and known values across checkpoints, macros and restart", async () => {
+  const h = harness(), initial = fixtureState();
+  h.cards.get("ada").description += " Age: early thirties. Gender: woman.";
+  initial.characters[0].profile.gender = "Woman";
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput(initial, { initialize: true })) }));
+  await h.select(); h.addTurn("Coat removed");
+  h.setResponse(async () => ({ content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] },
+    characters: [{ id: "c1", action: "update", changes: [{ field: "visible.dressAndLayers", value: "White shirt; coat on bench" }] }],
+    relationships: [], places: [], objectives: [] }) }));
+  await h.engine.schedule("chat", {}, "owner");
+  const before = await h.engine.loadStore("chat"), extracted = structuredClone(before.current);
+  Object.assign(extracted.characters[0].profile, { age: "Early thirties", gender: "Man", identity: "Wrong replacement identity" });
+  extracted.world.weather = "Snow"; extracted.characters[0].visible.dressAndLayers = "Wrong outfit";
+  h.setResponse(async request => {
+    assert.match(request.messages[1].content, /FILL MISSING AGE AND GENDER ONLY/);
+    assert.ok(!request.messages[0].content.includes("INITIAL SCENE DEFAULTS —"));
+    return { content: JSON.stringify(modelOutput(extracted, { sources: before.sources })) };
+  });
+  await h.engine.handleFrontend({ type: "story_fill_identity", chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 3);
+  const after = await h.engine.loadStore("chat");
+  for (const [oldState, next] of [[before.baseline, after.baseline], [before.current, after.current], [before.initialSetup.state, after.initialSetup.state],
+    ...Object.keys(before.checkpoints).map(key => [before.checkpoints[key].state, after.checkpoints[key].state])]) {
+    const expected = structuredClone(oldState); expected.characters[0].profile.age = "Early thirties";
+    assert.deepEqual(next, expected);
+  }
+  assert.equal(after.revision, before.revision + 1);
+  const full = JSON.parse(h.variables.get(`chat:${CHAT_KEYS.state}`));
+  assert.equal(full.schemaVersion, 3); assert.equal(full.characters[0].profile.age, "Early thirties");
+  const v2 = JSON.parse(h.variables.get(`chat:${CHAT_KEYS.previousState}`));
+  assert.equal(v2.schemaVersion, 2); assert.equal(v2.characters[0].profile.age, undefined); assert.equal(v2.characters[0].profile.gender, undefined);
+  const publicNow = JSON.parse(h.variables.get(`chat:${CHAT_KEYS.public}`));
+  assert.equal(publicNow.characters[0].age, "Early thirties"); assert.equal(publicNow.characters[0].gender, "Woman");
+  assert.equal(publicNow.characters[0].profile, undefined);
+  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.legacyPublic}`)).characters[0].age, undefined);
+  assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /AGE: Early thirties; GENDER: Woman/);
+  assert.ok(!h.variables.get(`chat:${CHAT_KEYS.visual}`).includes("Lantern Guild"));
+  const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 3); assert.deepEqual((await restarted.loadStore("chat")).current, after.current);
+  await restarted.handleFrontend({ type: "story_fill_identity", chatId: "chat" }, "owner");
+  assert.equal(h.requests.length, 3); assert.equal(h.sent.at(-1).payload.ok, true);
+});
+
+test("v2 saves migrate locally and explicit identity filling survives portable setup import and forks", async () => {
+  const h = harness(); await h.select();
+  const path = h.engine.pathFor("chat"), saved = h.files.get(path), revision = saved.revision;
+  for (const key of ["baseline", "current"]) saved[key] = legacyTrackerState(saved[key], 2);
+  saved.initialSetup.state = legacyTrackerState(saved.initialSetup.state, 2);
+  for (const checkpoint of Object.values(saved.checkpoints)) checkpoint.state = legacyTrackerState(checkpoint.state, 2);
+  const restarted = createStoryEngine(h.api); await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
+  assert.equal(h.requests.length, 1); assert.equal((await restarted.loadStore("chat")).revision, revision);
+  assert.equal((await restarted.loadStore("chat")).current.characters[0].profile.age, "Unknown");
+  h.setResponse(async () => ({ content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] },
+    characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "Ageless" }, { field: "profile.gender", value: "Genderless" }] }],
+    relationships: [], places: [], objectives: [] }) }));
+  await restarted.handleFrontend({ type: "story_fill_identity", chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 2);
+  await restarted.handleFrontend({ type: "story_export_setup", chatId: "chat" }, "owner");
+  const exported = h.sent.at(-1).payload; assert.equal(exported.ok, true);
+  const portable = JSON.parse(exported.fileText); assert.equal(portable.initialState.schemaVersion, 3);
+  assert.equal(portable.initialState.characters[0].profile.age, "Ageless");
+  await restarted.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: exported.fileText }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 2);
+  const original = h.messages.get("chat"), map = Object.fromEntries(original.map((message, index) => [message.id, `fork-${index}`]));
+  h.messages.set("fork", original.map(message => ({ ...structuredClone(message), id: map[message.id] })));
+  h.chats.set("fork", { id: "fork", character_id: "ada" });
+  await restarted.inheritFork({ sourceChatId: "chat", forkedChatId: "fork", forkedAtMessageId: original.at(-1).id, messageIdMap: map }, "owner");
+  const fork = await restarted.loadStore("fork");
+  assert.equal(fork.current.characters[0].profile.age, "Ageless"); assert.equal(fork.current.characters[0].profile.gender, "Genderless");
+  assert.equal(h.requests.length, 2);
+});
+
+test("identity fill keeps unsupported values Unknown and discards a response when the chat changes", async () => {
+  const h = harness(); await h.select(); const before = await h.engine.loadStore("chat");
+  h.setResponse(async () => ({ content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] },
+    characters: [], relationships: [], places: [], objectives: [] }) }));
+  await h.engine.handleFrontend({ type: "story_fill_identity", chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.match(h.sent.at(-1).payload.message, /Unknown values were preserved/);
+  assert.deepEqual((await h.engine.loadStore("chat")).current, before.current); assert.equal((await h.engine.loadStore("chat")).revision, before.revision);
+  h.setResponse(async () => {
+    h.messages.get("chat").push({ id: "racing-user", role: "user", content: "Wait." });
+    return { content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] }, characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "30" }] }], relationships: [], places: [], objectives: [] }) };
+  });
+  await h.engine.handleFrontend({ type: "story_fill_identity", chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, false); assert.match(h.sent.at(-1).payload.message, /changed during extraction/);
+  assert.deepEqual((await h.engine.loadStore("chat")).current, before.current);
+});
+
+test("identity extraction cannot commit after a source edit or navigation away", async () => {
+  for (const mutation of ["source", "navigation"]) {
+    const h = harness(); await h.select(); const before = await h.engine.loadStore("chat");
+    h.setResponse(async () => {
+      if (mutation === "source") h.cards.get("ada").description += " A newly edited fact.";
+      else await h.engine.handleFrontend({ type: "story_get_status", chatId: null }, "owner");
+      return { content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] },
+        characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "30" }] }], relationships: [], places: [], objectives: [] }) };
+    });
+    await h.engine.handleFrontend({ type: "story_fill_identity", chatId: "chat" }, "owner");
+    assert.equal(h.sent.at(-1).payload.ok, false); assert.match(h.sent.at(-1).payload.message, /changed during extraction/);
+    assert.deepEqual((await h.engine.loadStore("chat")).current, before.current);
+    assert.equal((await h.engine.status("chat", "owner")).processing, false);
+  }
 });
 
 test("contextual starting conditions persist in mirrors, restart and portable setups without rerolling", async () => {
@@ -396,12 +500,12 @@ test("old saved states and portable v1 setups upgrade without tracker regenerati
   const count = h.requests.length, revision = store.revision;
   await h.engine.schedule("chat", {}, "owner");
   assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).revision, revision);
-  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.state}`)).schemaVersion, 2);
+  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.state}`)).schemaVersion, 3);
   assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.legacyState}`)).schemaVersion, 1);
   const legacySetup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(legacyTrackerState(fixtureState()), new Map(), "initial-setup") };
   legacySetup.initialState = legacyTrackerState(legacySetup.initialState);
   await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(legacySetup), requestId: "legacy-import" }, "owner");
-  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).current.schemaVersion, 2);
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).current.schemaVersion, 3);
 });
 
 test("explicit imported-profile refresh fills missing stable fields without altering recorded starting conditions", async () => {
@@ -493,7 +597,7 @@ test("story clock updates and visual macros follow committed turns without extra
   h.setResponse(async request => {
     assert.ok(request.messages[1].content.includes('"date":"2031-12-31 (Winter)"'));
     assert.ok(request.messages[1].content.includes('"time":"23:50 (Late night)"'));
-    return { content: JSON.stringify({ schemaVersion: 2, world: { action: "update", changes: [{ field: "date", value: "2032-1-1 (Winter)" }, { field: "time", value: "12:10 am" }] },
+    return { content: JSON.stringify({ schemaVersion: 3, world: { action: "update", changes: [{ field: "date", value: "2032-1-1 (Winter)" }, { field: "time", value: "12:10 am" }] },
       characters: [{ id: "c1", action: "update", changes: [{ field: "visible.dressAndLayers", value: "White shirt; coat on bench" }] }], relationships: [], places: [], objectives: [] }) };
   });
   await h.engine.schedule("chat", {}, "owner");

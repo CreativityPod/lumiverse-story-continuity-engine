@@ -1,7 +1,7 @@
 import { TRACKER_OUTPUT_JSON_SCHEMA } from "./schemas.js";
 import { normalizeStoryClockValue } from "./clock.js";
 
-export const TRACKER_CONTRACT_VERSION = 7;
+export const TRACKER_CONTRACT_VERSION = 8;
 export const TRACKER_COLLECTIONS = ["characters", "relationships", "places", "objectives"];
 
 export class TrackerValidationError extends Error {

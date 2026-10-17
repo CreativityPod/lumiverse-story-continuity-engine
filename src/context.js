@@ -84,6 +84,8 @@ export function buildRoleplayContext(state, text = "", options = {}) {
       if (!fits()) { result[key].pop(); projection.omittedFields = true; if (key === "places") projection.omittedPlaces++; }
     }
   };
+  // Age/gender are the only profile fields admitted to observable text.
+  characterFields("profile", ["age", "gender"]);
   characterFields("visible", ["position", "physicalState", "dressAndLayers", "items", "activity", "hairAndGrooming"]);
   if (!visualOnly) {
     characterFields("profile", ["boundaries"]);
@@ -116,6 +118,8 @@ const REFERENCE_TOPICS = [
   ["family", "mother", "father", "parent", "parents", "sister", "brother", "child", "children", "spouse", "married", "marriage", "divorced"],
   ["boundary", "boundaries", "privacy", "permission", "limits", "touch", "refusal", "consent", "dealbreaker", "dealbreakers"],
   ["voice", "accent", "speech", "speaks", "personality", "temperament", "habit", "habits"],
+  ["age", "aged", "years", "birthday", "young", "old", "ageless"],
+  ["gender", "woman", "man", "nonbinary"],
   ["health", "injury", "injured", "condition", "medicine", "medical", "disability", "illness"],
 ];
 const meaningfulWords = text => [...contextWords(text)].filter(word => !REFERENCE_STOP_WORDS.has(word));

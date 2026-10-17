@@ -5,7 +5,7 @@ export const CARD = { id: "ada", name: "Ada", description: "Ada is a mechanic wi
 export const SOURCES = { cards: [CARD], selectedOpening: CARD.first_mes, lore: [] };
 export function character(id = "char:ada", role = "main") {
   return { id, name: id === "user" ? "Traveler" : "Ada", role, controller: role === "user" ? "user" : "model",
-    profile: { identity: "Mechanic", background: "Works at the station", personality: "Wary and patient", preferences: "Honesty", relationshipContext: "Unknown", boundaries: "Unknown", privateFacts: "Lantern Guild affiliation" },
+    profile: { age: "Unknown", gender: "Unknown", identity: "Mechanic", background: "Works at the station", personality: "Wary and patient", preferences: "Honesty", relationshipContext: "Unknown", boundaries: "Unknown", privateFacts: "Lantern Guild affiliation" },
     appearance: { face: "Angular", eyes: "Brown", skin: "Unknown", body: "Unknown", distinguishingFeatures: "Unknown" },
     visible: { hairAndGrooming: "Black hair", dressAndLayers: "Blue coat", physicalState: "Uninjured", position: "Platform", activity: "Waiting", items: "Toolbag" },
     internal: { mood: "Wary", intent: "Repair the signal", knowledge: "Knows the signal is faulty", beliefs: "Unknown", concerns: "Unknown" }, sourceMessageId: "card-baseline" };

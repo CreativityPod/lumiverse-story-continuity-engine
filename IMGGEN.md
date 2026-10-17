@@ -11,13 +11,18 @@ Use this macro in Lumiverse ImageGen's **Chat-aware Custom** Main preset:
 It expands to a labeled, observable-only snapshot of the committed current scene.
 It selects the main character, user character and colocated cast, plus current
 places. Character and place aliases retain names. Stable labels include `WHEN`,
-`WEATHER`, `LOCATION`, `CONTEXT`, `PROXIMITY & CONTACT`, `CHARACTER`,
+`AGE`, `GENDER`, `WEATHER`, `LOCATION`, `CONTEXT`, `PROXIMITY & CONTACT`, `CHARACTER`,
 `STABLE APPEARANCE`, `FACE`, `EYES`, `SKIN`, `BODY TYPE & PROPORTIONS`,
 `DISTINGUISHING FEATURES`, `CURRENT VISIBLE`, `HAIR & GROOMING`,
 `DRESS & LAYERS`, `PHYSICAL STATE`, `POSITION`, `ACTIVITY` and `ITEMS`.
 Unknown fields are omitted. A field not present is not permission to invent it.
 
-The image snapshot excludes stable private profiles, internal states, secrets,
+Age and gender are the only profile fields included, with source wording intact.
+Unknown values are omitted. Age may be descriptive; when chronological and apparent
+age differ, use the established apparent age for the image. Do not guess a missing
+age or gender or use either value to invent physical traits.
+
+The image snapshot excludes all other stable private profile fields, internal states, secrets,
 private place facts, relationships, objectives and source-message identifiers.
 All original JSON macros remain available in their existing formats.
 
@@ -31,9 +36,13 @@ Create an image-generation prompt for the current observable story scene.
 </CURRENT_SCENE>
 
 Use CURRENT_SCENE as the primary source for the fictional date/time, weather,
-location, stable appearance, current hair/grooming, clothing/layers, visible
+location, established age/gender, stable appearance, current hair/grooming, clothing/layers, visible
 physical condition, positions, contact and important items. Character and place
 aliases are bookkeeping; use names or visual descriptions in the image prompt.
+Age may be exact, approximate, descriptive or ageless. Preserve its uncertainty;
+when an apparent age is explicitly supplied, use it for visual depiction rather
+than depicting chronological age literally. Do not invent age or gender from
+omitted fields, names, clothing or other traits.
 An included character is a continuity reference, not a requirement to depict
 everyone. Use established positions and recent explicit events to choose the
 subjects actually visible in the intended composition.
@@ -64,4 +73,5 @@ to take precedence. Empty or incomplete setups do not expose preview state.
 Both story injection and this image snapshot have a 24,000-character text budget.
 Whole field values or records may be omitted, while complete canonical JSON
 remains saved. The image budget is spent entirely on observable fields. Existing
-JSON integrations can continue using `story_continuity.public_v1`.
+JSON integrations can use `story_continuity.public_v2` for observable state plus
+age/gender. `story_continuity.public_v1` retains its original shape without these fields.

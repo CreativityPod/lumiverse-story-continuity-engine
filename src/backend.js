@@ -79,8 +79,10 @@ export function createStoryEngine(api) {
   async function mirror(store) {
     if (!has("chat_mutation") || deleted.has(store.chatId)) return;
     for (const [key, value] of [[CHAT_KEYS.state, store.current && !store.blocked ? JSON.stringify(store.current) : ""],
+      [CHAT_KEYS.previousState, store.current && !store.blocked ? JSON.stringify(legacyTrackerState(store.current, 2)) : ""],
       [CHAT_KEYS.legacyState, store.current && !store.blocked ? JSON.stringify(legacyTrackerState(store.current)) : ""],
       [CHAT_KEYS.public, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current)) : ""],
+      [CHAT_KEYS.legacyPublic, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current, { legacy: true })) : ""],
       [CHAT_KEYS.visual, store.current && !store.blocked ? buildVisualContext(store.current, { sources: store.sources }) : ""]]) {
       if (!api.variables.chat.get || await api.variables.chat.get(store.chatId, key) !== value) await api.variables.chat.set(store.chatId, key, value);
     }
@@ -434,6 +436,65 @@ export function createStoryEngine(api) {
     return candidates;
   }
 
+  async function fillMissingIdentity(chatId, userId, includePrivate) {
+    return enqueue(chatId, async () => {
+      const config = await loadConfig(), store = await loadStore(chatId);
+      if (!config.enabled || required.some(permission => !has(permission))) throw new Error("Enable tracking and grant the required permissions first.");
+      if (!store.baseline || !store.current || store.blocked) throw new Error("Create or import a valid setup first.");
+      if (selection(userId) !== chatId || generating.has(chatId)) throw new Error("Open the intended chat and wait for its response to finish.");
+      const messages = await api.chat.getMessages(chatId), context = transcriptContext(messages);
+      const turns = listEligibleTurns(messages, context), prefix = validCheckpointPrefix(store, turns);
+      if (prefix.count !== turns.length || fingerprint(prefix.previousState) !== fingerprint(store.current)) throw new Error("Finish tracking the selected turns before filling missing age and gender.");
+      const fresh = await getSources(chatId, messages, userId);
+      if (isSpecializedCard(fresh.cards, messages)) throw new Error("Use Date Simulator Continuity Engine for this card.");
+      if (context.anchor ? store.epoch !== `import:${context.anchor.id}` || store.sourceFingerprint !== context.anchor.fingerprint
+        : store.epoch.startsWith("import:") || store.sources.selectedOpening !== fresh.sources.selectedOpening
+          || store.epoch !== `cards:${fresh.cards.map(card => card.id).join(",")}`) throw new Error("The selected setup changed; reconcile it before filling age and gender.");
+      const unknown = value => /^unknown\.?$/i.test(value.trim());
+      const missing = new Map(store.current.characters.map(char => [char.id, ["age", "gender"].filter(key => unknown(char.profile[key]))]));
+      if (![...missing.values()].some(fields => fields.length)) return "Age and gender are already recorded.";
+      const before = fingerprint(messages), sourceVersion = fingerprint(fresh.sources);
+      processing.add(chatId);
+      try {
+        await publish(chatId, userId, includePrivate);
+        let diagnostics;
+        const extracted = await runTracker(api, { initialize: true, refreshProfiles: true, refreshIdentityOnly: true,
+          sources: store.sources, previousState: store.current, sourceMessageId: context.anchor?.id ?? "card-baseline",
+          onDiagnostic: value => { diagnostics = value; } }, config, userId);
+        const selectedMessages = await api.chat.getMessages(chatId);
+        const selectedSources = await getSources(chatId, selectedMessages, userId);
+        if (selection(userId) !== chatId || generating.has(chatId) || deleted.has(chatId)
+          || fingerprint(selectedMessages) !== before || fingerprint(selectedSources.sources) !== sourceVersion) throw new Error("The chat or its sources changed during extraction; no age/gender changes were saved.");
+        const facts = new Map(extracted.characters.map(char => [char.id, Object.fromEntries((missing.get(char.id) ?? []).map(key => [key, char.profile[key]]))]));
+        let changes = 0;
+        const enrich = value => {
+          if (!value) return value;
+          const state = validateState(value);
+          for (const char of state.characters) for (const key of ["age", "gender"]) {
+            const fact = facts.get(char.id)?.[key];
+            if (unknown(char.profile[key]) && fact && !unknown(fact)) { char.profile[key] = fact; changes++; }
+          }
+          return validateState(state);
+        };
+        // Only fill the two missing fields. Scene, identity prose, sources and
+        // provenance remain intact; old checkpoints gain the same known facts.
+        store.baseline = enrich(store.baseline); store.current = enrich(store.current);
+        if (store.initialSetup) store.initialSetup.state = enrich(store.initialSetup.state);
+        for (const checkpoint of Object.values(store.checkpoints)) checkpoint.state = enrich(checkpoint.state);
+        if (changes) commitRevision(store);
+        store.trackerDiagnostics = diagnostics;
+        const metric = { first_pass: "firstPass", repaired: "repaired" }[diagnostics?.outcome];
+        if (metric) {
+          store.trackerMetrics[metric]++;
+          store.trackerMetrics.elapsedMs += diagnostics.elapsedMs;
+          store.trackerMetrics.completionTokens += diagnostics.attempts.reduce((sum, attempt) => sum + attempt.usage.completionTokens, 0);
+        }
+        await saveStore(store); await mirror(store);
+        return changes ? "Missing age and gender filled from saved card sources." : "No additional age or gender was established by the saved cards; Unknown values were preserved.";
+      } finally { processing.delete(chatId); await publish(chatId, userId, includePrivate); }
+    });
+  }
+
   async function handleFrontend(payload, userId) {
     const type = payload?.type;
     if (!type?.startsWith("story_")) return;
@@ -501,6 +562,9 @@ export function createStoryEngine(api) {
         const store = await loadStore(chatId);
         if (store.lastError || !store.current) throw new Error(store.lastError || store.blocked || "The initial story state could not be created.");
         send({ type: "story_setup_result", chatId, requestId: payload.requestId, ok: true, message: "Initial profiles and story state are ready." }, userId);
+      } else if (type === "story_fill_identity") {
+        const message = await fillMissingIdentity(chatId, userId, payload.includePrivate);
+        send({ type: "story_action_result", chatId, ok: true, message }, userId);
       } else if (type === "story_reprocess" || type === "story_refresh_cards") {
         await schedule(chatId, { reprocess: type === "story_reprocess", refreshCards: type === "story_refresh_cards", includePrivate: payload.includePrivate }, userId);
         const store = await loadStore(chatId);

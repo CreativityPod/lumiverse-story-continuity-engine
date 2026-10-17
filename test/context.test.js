@@ -92,6 +92,22 @@ test("visual text has stable image labels and excludes every private category an
   const known = fixtureState(); known.characters[0].visible.items = "No weapons"; known.characters[0].appearance.skin = " unknown ";
   const rendered = buildVisualContext(known); assert.match(rendered, /ITEMS: No weapons/); assert.doesNotMatch(rendered, /SKIN:/);
 });
+
+test("visual and roleplay context include known age/gender while every other profile field remains private", () => {
+  const state = extendedState();
+  Object.assign(state.characters[0].profile, { age: "Ancient; appears to be a young adult", gender: "Woman", identity: "PRIVATE_IDENTITY_SENTINEL" });
+  Object.assign(state.characters[1].profile, { age: "Early forties", gender: "Man" });
+  const before = JSON.stringify(state), visual = buildRoleplayContext(state, "", { sources: SOURCES, visualOnly: true });
+  assert.deepEqual(visual.characters[0].profile, { age: state.characters[0].profile.age, gender: "Woman" });
+  const text = buildVisualContext(state, { sources: SOURCES });
+  assert.match(text, /AGE: Ancient; appears to be a young adult; GENDER: Woman/);
+  for (const secret of ["PRIVATE_IDENTITY_SENTINEL", "Lantern Guild", "REMOTE_SECRET", "Early forties", "PRIVATE CHARACTER CONTEXT"]) assert.ok(!text.includes(secret));
+  const roleplay = renderContinuityContext(buildRoleplayContext(state, "", { sources: SOURCES }));
+  assert.match(roleplay, /AGE: Ancient; appears to be a young adult; GENDER: Woman/);
+  assert.ok(roleplay.includes("PRIVATE_IDENTITY_SENTINEL"));
+  assert.doesNotMatch(buildVisualContext(fixtureState()), /\b(?:AGE|GENDER):/);
+  assert.equal(JSON.stringify(state), before);
+});
 test("targeted references retrieve an omitted allergy without resending guidance, examples or the opening", () => {
   const sources = structuredClone(SOURCES);
   sources.cards[0].description = "Ada is allergic to shellfish. RAW_UNRELATED_SOURCE_MARKER: she studied distant constellations.";

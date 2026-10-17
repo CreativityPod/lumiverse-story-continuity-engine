@@ -7,7 +7,7 @@ import { normalizeTrackerDiagnostics } from "../src/diagnostics.js";
 import { fixtureState, SOURCES, character, modelOutput } from "./fixtures.js";
 
 const patch = (id, changes = [], action = "update") => ({ ...(id ? { id } : {}), action, changes: changes.map(([field, value]) => ({ field, value })) });
-const output = (parts = {}) => ({ schemaVersion: 2, world: patch(null, [], "preserve"), characters: [], relationships: [], places: [], objectives: [], ...parts });
+const output = (parts = {}) => ({ schemaVersion: 3, world: patch(null, [], "preserve"), characters: [], relationships: [], places: [], objectives: [], ...parts });
 function initialOutput(sceneStatus = "in_progress") {
   return output({ world: patch(null, [["date", "October 13"], ["time", "Midnight"], ["weather", "Rain"], ["sceneStatus", sceneStatus]]),
     characters: [patch("c1", [["name", "Ada"], ["profile.identity", "Mechanic"], ["profile.personality", "Practical"], ["profile.privateFacts", "Lantern Guild"], ["visible.dressAndLayers", "Blue coat"]])] });
@@ -196,7 +196,7 @@ test("unsafe fields, duplicate changes and undeclared characters are not guessed
   // still be checked locally rather than trusted to provider JSON enforcement.
   const schema = aliasOutputSchema(createAliasRegistry(SOURCES, cast()), { patches: true });
   assert.equal(schema.additionalProperties, false);
-  assert.throws(() => decodeModelOutput({ schemaVersion: 2 }, createAliasRegistry(SOURCES, cast())), /world must be an object/);
+  assert.throws(() => decodeModelOutput({ schemaVersion: 3 }, createAliasRegistry(SOURCES, cast())), /world must be an object/);
   const incomplete = output(); delete incomplete.characters;
   assert.throws(() => decodeModelOutput(incomplete, createAliasRegistry(SOURCES, cast())), /characters.*must be an array/);
 });

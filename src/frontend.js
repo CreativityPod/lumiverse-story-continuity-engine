@@ -183,6 +183,7 @@ export function setup(ctx) {
   button(actions, "Refresh Connections", () => send({ type: "story_get_connections" }));
   const reprocess = button(actions, "Reprocess Latest Turn", () => { feedback.textContent = "Reprocessing latest turn…"; send({ type: "story_reprocess", includePrivate: showPrivate }); });
   const refreshCards = button(actions, "Refresh Card Profiles", () => { feedback.textContent = "Refreshing profiles and reconciling selected history…"; send({ type: "story_refresh_cards", includePrivate: showPrivate }); });
+  const fillIdentity = button(actions, "Fill Missing Age / Gender", () => { feedback.textContent = "Extracting missing age and gender from saved cards…"; send({ type: "story_fill_identity", includePrivate: showPrivate }); });
   const cleanupButton = button(actions, "Clean Unused Tracking Files", () => { send(cleanupToken ? { type: "story_cleanup_unused", token: cleanupToken } : { type: "story_scan_cleanup" }); cleanupToken = null; cleanupButton.textContent = "Clean Unused Tracking Files"; });
   const download = button(setupSection, "Download JSON File", () => {
     if (!downloadText) return;
@@ -256,7 +257,7 @@ export function setup(ctx) {
     exportButton.disabled = Boolean(pendingSetup) || !latestStatus?.canExport;
     beginButton.hidden = !latestStatus?.canBegin;
     beginButton.disabled = Boolean(pendingSetup) || generationBusy;
-    reprocess.disabled = refreshCards.disabled = !activeChatId || !latestStatus?.snapshot || latestStatus.processing || generationBusy;
+    reprocess.disabled = refreshCards.disabled = fillIdentity.disabled = !activeChatId || !latestStatus?.snapshot || latestStatus.processing || generationBusy;
     if (inlineSetup) {
       inlineSetup.create.textContent = createButton.textContent;
       inlineSetup.create.disabled = createButton.disabled; inlineSetup.import.disabled = importButton.disabled;
@@ -297,7 +298,7 @@ export function setup(ctx) {
   function renderSnapshot(snapshot) {
     snapshotContent.replaceChildren();
     if (!snapshot) { snapshotContent.append(element("div", "sce-hint", "No tracked scene is available yet.")); return; }
-    const labels = { date: "Date", time: "Time", weather: "Weather", location: "Location", immediateContext: "Context", proximityAndContact: "Proximity / contact", sceneStatus: "Scene",
+    const labels = { age: "Age", gender: "Gender", date: "Date", time: "Time", weather: "Weather", location: "Location", immediateContext: "Context", proximityAndContact: "Proximity / contact", sceneStatus: "Scene",
       face: "Face", eyes: "Eyes", skin: "Skin", body: "Body", distinguishingFeatures: "Features", hairAndGrooming: "Hair / grooming", dressAndLayers: "Clothing / layers", physicalState: "Condition", position: "Position", activity: "Activity", items: "Items", description: "Description", currentState: "Current state", connections: "Connections" };
     const record = (title, data) => {
       const root = element("div", "sce-record"); root.append(element("h4", "", title));
@@ -307,7 +308,7 @@ export function setup(ctx) {
       snapshotContent.append(root);
     };
     record("World and current scene", { ...snapshot.world, date: formatStoryClockValue("date", snapshot.world.date), time: formatStoryClockValue("time", snapshot.world.time) });
-    for (const char of snapshot.characters ?? []) record(`${char.name} · ${char.role === "npc" ? "NPC" : char.role === "user" ? "User character" : "Main character"}`, { ...char.appearance, ...char.visible });
+    for (const char of snapshot.characters ?? []) record(`${char.name} · ${char.role === "npc" ? "NPC" : char.role === "user" ? "User character" : "Main character"}`, { age: char.age, gender: char.gender, ...char.appearance, ...char.visible });
     const names = new Map((snapshot.characters ?? []).map(char => [char.id, char.name]));
     for (const rel of snapshot.relationships ?? []) record(`${names.get(rel.fromId) ?? rel.fromId} → ${names.get(rel.toId) ?? rel.toId}`, { Relationship: rel.publicStatus });
     for (const place of snapshot.places ?? []) record(place.name, { description: place.description, currentState: place.currentState, connections: place.connections });

@@ -1,10 +1,10 @@
 # Story Continuity Engine
 
-Persistent character and world state for any character card. Version **1.6.4** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
+Persistent character and world state for any character card. Version **1.7.0** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
 
 ## Install
 
-1. Extract `release/Story_Continuity_Engine_v1.6.4.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
+1. Extract `release/Story_Continuity_Engine_v1.7.0.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
 2. Grant **generation**, **interceptor**, **chat_mutation**, **characters**, and **chats**. These support quiet tracker calls, prompt injection, chat-variable mirrors, and card/chat reads. Grant **world_books** to include enabled constant entries from attached lorebooks and **ui_panels** for the floating widget. This extension does not modify character cards or lorebooks.
 3. Open an ordinary character chat. Choose **Import Saved Setup** or **Create From Character Card** beneath the opening message, or use the matching controls in the **Story Continuity** drawer. A new chat is recommended for the first run.
 4. Optionally select a tracker connection and structured-output mode, then select **Save Settings**. Without a selection, the host's default connection is used.
@@ -22,6 +22,10 @@ When creating from a card, the model extracts **date, time, and weather** from t
 Missing weather receives a concise contextual description of relevant warmth/cold, clouds or precipitation, and wind. An approximate temperature is optional when supported by the setting. Indoor scenes distinguish outside conditions from their relevance indoors; sealed or airless settings can explicitly have no ordinary weather. Unknown environments use modest conditions without asserting unsupported geography, season, daylight or climate. Existing weather is preserved even when brief. The model does not invent forecasts or future weather events. These are fictional starting choices, not live weather data.
 
 The backend still saves random fictional **anchors and safety defaults** before extraction: a date from **2020–2039**, a time from **00:00–23:59**, and one of **Clear skies**, **Partly cloudy**, **Overcast**, **Light rain**, or **Light breeze and dry skies**. The model reuses saved date/time anchors when unconstrained and adapts only missing fields when an anchor conflicts with the source setting. Contextual values returned by the model take precedence. If a required field is still `Unknown`, omitted, or preserved without a starting value, the backend fills it from the saved safety default without another model call. The safety defaults are deliberately generic; contextual scene fitting depends on the extraction model.
+
+Every character profile has separate **age** and **gender** text fields. The tracker extracts established values from factual card definitions, the selected opening and applicable lore. Age can be an exact age, a range or description such as **Early thirties**, **Adult; exact age unknown**, **Ageless**, or **Ancient; appears to be a young adult**. Gender preserves the source wording without a fixed list. Missing values remain `Unknown`; these fields are never invented by scene defaults or guessed from names, appearance, clothing, species, occupation, stereotypes or pronouns alone. Routine tracking preserves them until an explicit correction or supported canonical change. New `identity` summaries focus on species, occupation, origin, titles and social identity; older identity prose is preserved.
+
+Known age/gender appear in the drawer and the readable roleplay/image snapshot as `AGE` and `GENDER`. ImageGen should use a source-established apparent age when it differs from chronological age, preserving uncertainty. Unknown values are omitted from the readable text, and the rest of the private profile remains excluded from image context. Existing chats can use **Fill Missing Age / Gender** to extract only unknown values from their saved card sources without rebuilding scenes or replaying turns. It fills the same still-missing fields in the baseline, current state, original setup and checkpoints, preserving existing values, other fields and provenance. If the sources do not establish the information, it stays `Unknown`.
 
 Missing **outfits for model-controlled characters** are also automatic, independent of the checkbox. When clothing is entirely unspecified, the model chooses a simple outfit compatible with the setting, weather and established preferences. Existing clothing, including partial descriptions, is preserved without adding layers, accessories, possessions or physical traits. Explicit absence of clothing is preserved, and characters for whom clothing is inapplicable receive an explicit clothing condition. The user's outfit is never generated.
 
@@ -69,11 +73,24 @@ The drawer, injected `WHEN` line and visual macro show dates as **October 17 (Fa
 
 For image generation, use `{{getchatvar::story_continuity.visual_text_v1}}` in a Chat-aware Custom Main preset. It supplies labeled observable scene text with stable appearance, current hair/grooming, **DRESS & LAYERS**, positions and items, without profiles, secrets, internal state or objectives. Existing JSON macros retain their formats. See [image-generation parser instructions](IMGGEN.md), including the separate-parser freshness caveat.
 
+Tracking macros:
+
+| Macro | Contents |
+|---|---|
+| `{{getchatvar::story_continuity.state_v3}}` | Complete private schema-3 JSON, including profile age/gender. |
+| `{{getchatvar::story_continuity.public_v2}}` | Observable JSON, with character-level age/gender and no other profile fields. |
+| `{{getchatvar::story_continuity.visual_text_v1}}` | Selected readable scene text, including known AGE/GENDER; recommended for ImageGen. |
+| `{{getchatvar::story_continuity.state_v2}}` | Compatibility private schema-2 JSON, without dedicated age/gender fields. |
+| `{{getchatvar::story_continuity.state_v1}}` | Compatibility private schema-1 JSON, also without relationshipContext/boundaries. |
+| `{{getchatvar::story_continuity.public_v1}}` | Original observable JSON, without age/gender or other profile fields. |
+
+Macros reflect the latest committed checkpoint and do not trigger extraction. Setup previews are never exposed.
+
 | State | Fields |
 |---|---|
 | World | Fictional date/time, weather, location, immediate context, proximity/contact, scene lifecycle |
 | Every main character / NPC | Persistent ID, name, controller, stable profile and appearance, current visible state, private internal state |
-| Stable profile | Identity, background, personality/disposition and voice, preferences/deal-breakers, relationship history/agreements, boundaries, private facts/secrets and durable health/capability constraints |
+| Stable profile | Age and gender as text, identity, background, personality/disposition and voice, preferences/deal-breakers, relationship history/agreements, boundaries, private facts/secrets and durable health/capability constraints |
 | Stable appearance | Face, eyes, skin, body, distinguishing features |
 | Visible state | Hair/grooming, clothing/layers, physical condition, position, current activity, items |
 | Internal state | Mood, immediate intent, knowledge, beliefs, concerns |
@@ -90,6 +107,7 @@ The drawer uses Lumiverse native switches, selects, numeric inputs, checkbox, an
 - **Tracking enabled**, **Show Widget**, tracker connection, output mode, output budget, timeout, **Save Settings**, and **Refresh Connections**.
 - Startup **Import Saved Setup** / **Create From Character Card** choices beneath the opening message, with matching drawer actions and running setup stages/elapsed time. Failure details remain in the drawer; inline controls show the available profile or paused status and offer **Retry Setup**. While a file picker or setup request is pending, both actions are disabled to avoid duplicate choices.
 - An observable snapshot of the world, characters/NPCs, public relationships, and recurring places.
+- **Fill Missing Age / Gender** extracts only missing age/gender from saved card sources. It leaves known values, scenes, identity prose and other tracking intact. It does not reread newly edited card definitions; use Refresh Card Profiles for a deliberate full refresh.
 - **Show Private Tracker State** explicitly reveals full state including profiles, secrets, knowledge, intentions, and objectives.
 - **Reprocess Latest Turn** reruns the latest eligible turn against its preceding checkpoint.
 - **Refresh Card Profiles** rebuilds a native baseline from the edited card and reconciles selected history. For an imported setup, it fills missing stable profile fields from that setup's saved sources while preserving its recorded scene and existing facts. Card edits are flagged before this action; opening edits/swipes rebuild native baselines automatically.
@@ -114,7 +132,7 @@ The secure-browser Save As API is used when available. Otherwise, **Download JSO
 - State supports up to 24 characters total, 48 relationships, 32 places, and 12 objectives. Text fields allow 1,600 characters; total canonical state is capped at 64,000 characters. Original card/lore sources are capped at 96,000 characters. These are ceilings, not target lengths.
 - Original-source retrieval uses local keywords and topic matching, capped at eight excerpts and 6,000 serialized characters per update. Long passages are marked partial. Matching is conservative and may miss a relevant detail; it does not make an extra LLM call to search. Use **Refresh Card Profiles** for deliberate re-extraction when needed.
 - Tracker schema v2 adds explicit `profile.relationshipContext` and `profile.boundaries`, using Date Simulator's stable-profile coverage as a reference. Participant identity/disposition/preferences/relationship/boundary facts are generic per-character fields; initial context stays in the world/character baseline. Date Simulator is not a runtime dependency.
-- Saved schema-v1 state and portable setups upgrade locally without generating history or changing provenance. The new fields initialize as `Unknown` when absent; **Refresh Card Profiles** can re-extract them from sources. The complete mirror is `story_continuity.state_v2`; `story_continuity.state_v1` remains a compatibility projection without the two new profile fields. `story_continuity.public_v1` remains observable-only JSON. `story_continuity.visual_text_v1` is a selected observable-only text mirror with short aliases and names.
+- Saved schema-v1/v2 state and portable setups upgrade locally to schema 3 without a model call, history replay or provenance change. Missing age/gender start as `Unknown`; legacy identity prose is not parsed or rewritten on load. **Fill Missing Age / Gender** can backfill them from saved sources. The complete mirror is `story_continuity.state_v3`. Existing `state_v2`, `state_v1` and `public_v1` keep their prior JSON shapes; age/gender are omitted from those compatibility projections. The new `public_v2` includes only age/gender from the profile alongside observable state. The selected readable `visual_text_v1` adds known `AGE`/`GENDER` labels.
 - Tracker output supports 400–16,384 tokens (default 6,144). Timeout supports 5–300 seconds (default 120). Original output and its one repair share a deadline; reconciliation has a 240-second budget. Large existing chats can require another reprocess pass after that budget; completed checkpoints are retained.
 - **Auto**, **OpenAI-compatible JSON Schema**, **OpenAI Responses JSON Schema**, **Anthropic Tool**, **Google JSON Schema**, and **Plain JSON (prompt only)** are selectable. Auto selects a structured mode for recognized providers; other providers use prompt-only JSON. Quiet tracker requests clear narrative stop sequences and pin a resolved default connection. OpenAI mode uses Responses formatting when the selected preset requests it and is readable, otherwise Chat Completions formatting. Explicit Responses mode works without the additional host Presets permission. The drawer records the effective mode. Schemas enumerate entity aliases and permitted field paths; strict local validation owns cross-record dependencies, field bounds, role protection and provenance.
 - The engine records continuity. It does not autonomously simulate off-screen actions, forecast real weather, invent missing history, or replace the host's character definition.

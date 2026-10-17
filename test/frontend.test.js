@@ -78,6 +78,23 @@ test("drawer dates omit years and exact times show AM/PM with narrative descript
   } finally { h.restore(); }
 });
 
+test("drawer displays age/gender and provides a scoped action for older chats", () => {
+  const h = mountHarness();
+  try {
+    const state = fixtureState(); Object.assign(state.characters[0].profile, { age: "Early thirties", gender: "Woman" });
+    h.status({ snapshot: publicTrackerSnapshot(state) });
+    const record = [...document.querySelectorAll(".sce-record")].find(node => node.querySelector("h4")?.textContent.includes("Ada"));
+    assert.ok(record.textContent.includes("AgeEarly thirties")); assert.ok(record.textContent.includes("GenderWoman"));
+    assert.ok(!record.textContent.includes("Lantern Guild"));
+    const button = h.button("Fill Missing Age / Gender"); assert.equal(button.disabled, false); button.click();
+    assert.equal(h.sent.at(-1).type, "story_fill_identity"); assert.equal(h.sent.at(-1).chatId, "chat");
+    h.status({ processing: true }); assert.equal(button.disabled, true);
+    h.status({ snapshot: publicTrackerSnapshot(fixtureState()) });
+    const blank = [...document.querySelectorAll(".sce-record")].find(node => node.querySelector("h4")?.textContent.includes("Ada"));
+    assert.ok(![...blank.querySelectorAll("dt")].some(node => ["Age", "Gender"].includes(node.textContent)));
+  } finally { h.restore(); }
+});
+
 test("drawer preserves unsaved settings and sends one concrete settings payload", () => {
   const h = mountHarness();
   try {

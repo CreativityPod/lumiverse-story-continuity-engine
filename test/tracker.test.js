@@ -8,6 +8,44 @@ test("configuration bounds and Claude provider alias", () => {
   assert.equal(config.maxTokens, 16384); assert.equal(config.timeoutMs, 5000);
   assert.equal(resolveOutputMode({ provider: "claude" }, "auto"), "anthropic");
 });
+
+test("card extraction uses descriptive age/gender fields and accepts unknown ages without repair", async () => {
+  for (const age of ["Early thirties", "Ageless; appears to be a young adult", "Unknown"]) {
+    const sources = structuredClone(SOURCES), chosen = fixtureState();
+    sources.cards[0].description += ` Age: ${age}. Gender: Nonbinary.`;
+    Object.assign(chosen.characters[0].profile, { age, gender: "Nonbinary" });
+    let calls = 0;
+    const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+      calls++;
+      assert.match(request.messages[0].content, /Age is text, not a numeric requirement/);
+      assert.match(request.messages[0].content, /never automatic scene defaults/);
+      assert.match(request.messages[0].content, /never guess age or gender/i);
+      assert.match(request.messages[1].content, /Gender: Nonbinary/);
+      const schema = request.messages[0].content;
+      assert.ok(schema.includes("profile.age")); assert.ok(schema.includes("profile.gender"));
+      return { content: JSON.stringify(modelOutput(chosen, { sources, initialize: true })) };
+    } } };
+    const state = await runTracker(api, { initialize: true, sources, sourceMessageId: "card-baseline" }, {});
+    assert.equal(calls, 1); assert.equal(state.characters[0].profile.age, age); assert.equal(state.characters[0].profile.gender, "Nonbinary");
+  }
+});
+
+test("numeric age responses use the existing field repair while retaining other extracted facts", async () => {
+  const chosen = fixtureState(); Object.assign(chosen.characters[0].profile, { age: "32", gender: "Woman" });
+  const rejected = modelOutput(chosen, { initialize: true }); rejected.characters[0].profile.age = 32;
+  let calls = 0;
+  const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+    calls++;
+    if (calls === 1) return { content: JSON.stringify(rejected) };
+    assert.match(request.messages.at(-1).content, /profile.age/);
+    return { content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] },
+      characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "32" }] }], relationships: [], places: [], objectives: [] }) };
+  } } };
+  const next = await runTracker(api, { initialize: true, sources: SOURCES, sourceMessageId: "card-baseline" }, {});
+  assert.equal(calls, 2); assert.equal(next.characters[0].profile.age, "32"); assert.equal(next.characters[0].profile.gender, "Woman");
+  assert.equal(next.characters[0].profile.identity, chosen.characters[0].profile.identity);
+  assert.equal(next.characters[0].visible.dressAndLayers, chosen.characters[0].visible.dressAndLayers);
+});
 test("tracker forwards user scope, repairs once and has a shared request deadline", async () => {
   const requests = [], progress = [];
   const api = { connections: { get: async () => ({ provider: "anthropic" }) }, generate: { quiet: async input => { requests.push(input); return requests.length === 1 ? { content: "bad" } : { tool_calls: [{ name: "record_story_state", args: modelOutput(undefined, { initialize: true }) }] }; } } };
@@ -148,7 +186,7 @@ test("initial scene conditions preserve partial clocks and non-weather worlds th
     const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
       requests.push(request);
       return { content: JSON.stringify(requests.length === 1 ? rejected : {
-        schemaVersion: 2, world: { action: "update", changes: [{ field: "sceneStatus", value: "active" }] },
+        schemaVersion: 3, world: { action: "update", changes: [{ field: "sceneStatus", value: "active" }] },
         characters: [], relationships: [], places: [], objectives: [],
       }) };
     } } };
@@ -172,7 +210,7 @@ test("routine timing contract supports implied passage without fixed ticks or fi
     assert.match(prompt, /Keep approximate clocks approximate/);
     assert.match(prompt, /Weather changes only when the narrative supports it/);
     assert.ok(!prompt.includes("For wholly missing world fields only"));
-    return { content: JSON.stringify({ schemaVersion: 2, world: { action: "preserve", changes: [] },
+    return { content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] },
       characters: [], relationships: [], places: [], objectives: [] }) };
   } } };
   const next = await runTracker(api, { sources: SOURCES, previousState: previous,
