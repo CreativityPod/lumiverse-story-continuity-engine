@@ -49,8 +49,16 @@ function addLegacyNotice(h, phase = "ready", id = "legacy-notice") {
   h.messages.get("chat").push(notice); return notice;
 }
 
-test("new turns update clothing and place state while export remains the original opening", async () => {
-  const h = harness(); await h.select(); h.addTurn("Coat removed. Door opened."); await h.engine.schedule("chat", {}, "owner");
+test("automatic starting outfits persist on reopen and export while turns update clothing and place state", async () => {
+  const h = harness();
+  h.cards.get("ada").first_mes = h.messages.get("chat")[0].content = "Ada waits beneath the platform clock.";
+  await h.select();
+  assert.match(h.requests[0].messages[0].content, /Fill missing scene details is OFF/);
+  assert.match(h.requests[0].messages[0].content, /Independently of the checkbox/);
+  assert.equal((await h.engine.loadStore("chat")).current.characters[0].visible.dressAndLayers, "Blue coat");
+  await h.open(); assert.equal(h.requests.length, 1);
+  h.addTurn("Coat removed. Door opened."); await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, 2); assert.ok(!h.requests[1].messages[0].content.includes("INITIAL SCENE DEFAULTS"));
   const store = await h.engine.loadStore("chat"); assert.equal(store.current.characters[0].visible.dressAndLayers, "White shirt; blue coat on bench"); assert.equal(store.current.places[0].currentState, "Side door open");
   await h.engine.handleFrontend({ type: "story_export_setup", chatId: "chat", requestId: "export" }, "owner");
   const result = h.sent.at(-1).payload; assert.equal(result.ok, true);
@@ -422,11 +430,13 @@ test("importing from the startup choice restores locally without an unused extra
   const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(fixtureState(), new Map(), "initial-setup") };
   setup.initialState.world.weather = "Clear skies";
   setup.initialState.world.date = setup.initialState.world.time = "Unknown";
+  setup.initialState.characters[0].visible.dressAndLayers = "Unknown";
   await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup), requestId: "import" }, "owner");
   assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 0);
   const store = await h.engine.loadStore("chat"), status = await h.engine.status("chat", "owner");
   assert.equal(store.current.world.weather, "Clear skies"); assert.equal(store.awaitingSetup, false);
   assert.equal(store.current.world.date, "Unknown"); assert.equal(store.current.world.time, "Unknown");
+  assert.equal(store.current.characters[0].visible.dressAndLayers, "Unknown");
   assert.equal(status.canCreate, false); assert.equal(status.canBegin, true);
   assert.equal(h.messages.get("chat").filter(isInitializationNotice).length, 0);
   const anchor = h.messages.get("chat").find(message => message.metadata?.story_continuity_setup);

@@ -130,7 +130,9 @@ test("scene detail choices sync across setup controls, survive status updates an
     const inline = bubble.querySelector('[aria-label="Fill missing scene details"]');
     const drawer = document.querySelector('.sce-panel [aria-label="Fill missing scene details"]');
     assert.equal(inline.checked, false); assert.equal(drawer.checked, false);
-    assert.ok(bubble.textContent.includes("Missing date, time, and weather are filled automatically."));
+    assert.ok(bubble.textContent.includes("Auto-fill missing date, time, weather, and outfits."));
+    assert.ok(bubble.textContent.includes("Minor grooming, atmosphere, and mild mood."));
+    assert.ok(!bubble.textContent.includes("Outfit, minor grooming"));
     inline.checked = true; inline.dispatchEvent(new window.Event("change"));
     showStartup(h); assert.equal(inline.checked, true); assert.equal(drawer.checked, true);
     drawer.checked = false; drawer.dispatchEvent(new window.Event("change")); assert.equal(inline.checked, false);

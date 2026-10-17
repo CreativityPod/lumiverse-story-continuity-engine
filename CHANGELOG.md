@@ -1,3 +1,10 @@
+# 1.5.1
+
+- New card setups automatically fill entirely missing outfits for model-controlled characters, alongside date, time and weather, in the existing initialization request.
+- Preserve partial clothing descriptions and explicit absence of clothing; record inapplicability rather than forcing clothes onto characters that do not wear them. User-controlled outfits remain user-defined.
+- **Fill missing scene details** now covers minor grooming, atmosphere and mild mood. Inline and drawer descriptions reflect the automatic outfit default.
+- Unknown model-character starting outfits use the existing single repair limit. Saved outfits persist; routine tracking, existing saves and imports do not regenerate them. Canonical state and portable formats remain compatible.
+
 # 1.5.0
 
 - New card setups fill missing fictional date, time and weather during the existing extraction request, respecting established card/opening/lore constraints.

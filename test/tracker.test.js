@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runTracker, resolveOutputMode, normalizeConfig } from "../src/tracker.js";
-import { SOURCES, modelOutput, fixtureState } from "./fixtures.js";
+import { SOURCES, modelOutput, fixtureState, character } from "./fixtures.js";
 
 test("configuration bounds and Claude provider alias", () => {
   const config = normalizeConfig({ maxTokens: 99999, timeoutMs: 1 });
@@ -29,7 +29,7 @@ test("missing initial clock and weather receive one repair within the existing s
   sources.cards[0].scenario = "A quiet railway station.";
   const output = modelOutput(undefined, { initialize: true });
   for (const key of ["date", "time", "weather"]) output.world[key] = "Unknown";
-  output.characters[0].visible.dressAndLayers = output.characters[0].internal.mood = "Unknown";
+  output.characters[0].internal.mood = "Unknown";
   const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
     requests.push(structuredClone(request.messages));
     if (requests.length === 2) Object.assign(output.world, { date: "Day 1, early spring", time: "Morning", weather: "Light clouds" });
@@ -40,7 +40,37 @@ test("missing initial clock and weather receive one repair within the existing s
   assert.match(requests[0][0].content, /Fill missing scene details is OFF/);
   for (const key of ["date", "time", "weather"]) assert.ok(requests[1].at(-1).content.includes(`world.${key}`));
   assert.equal(state.world.date, "Day 1, early spring"); assert.equal(state.world.time, "Morning"); assert.equal(state.world.weather, "Light clouds");
-  assert.equal(state.characters[0].visible.dressAndLayers, "Unknown"); assert.equal(state.characters[0].internal.mood, "Unknown");
+  assert.equal(state.characters[0].visible.dressAndLayers, "Blue coat"); assert.equal(state.characters[0].internal.mood, "Unknown");
+});
+
+test("unchecked setup repairs missing model outfits while allowing an unclothed NPC and an unknown user outfit", async () => {
+  const sources = structuredClone(SOURCES), initial = fixtureState(), requests = [];
+  sources.cards[0].first_mes = sources.selectedOpening = "Ada waits beside a fox and the traveler on the platform.";
+  initial.characters[0].visible.dressAndLayers = initial.characters[0].internal.mood = "Unknown";
+  const fox = character("npc:fox", "npc"); fox.name = "Fox"; fox.profile.identity = "Wild fox"; fox.visible.dressAndLayers = "Unknown";
+  const user = character("user", "user");
+  for (const section of [user.profile, user.appearance, user.visible, user.internal]) for (const key of Object.keys(section)) section[key] = "Unknown";
+  initial.characters.push(fox, user);
+  const api = { connections: { list: async () => [] }, generate: { quiet: async request => {
+    requests.push(structuredClone(request.messages));
+    if (requests.length === 2) {
+      initial.characters[0].visible.dressAndLayers = "Plain work shirt and trousers";
+      fox.visible.dressAndLayers = "Not applicable; a wild fox without clothing";
+    }
+    return { content: JSON.stringify(modelOutput(initial, { sources, initialize: true })) };
+  } } };
+  const state = await runTracker(api, { initialize: true, sources, sourceMessageId: "card-baseline" }, {}, "owner");
+  assert.equal(requests.length, 2); assert.match(requests[0][0].content, /Fill missing scene details is OFF/);
+  assert.match(requests[0][0].content, /Independently of the checkbox/);
+  assert.match(requests[0][0].content, /Preserve supplied clothing, including partial descriptions/);
+  assert.match(requests[0][0].content, /Never choose the user-controlled character's outfit/);
+  const repair = requests[1].at(-1).content;
+  assert.match(repair, /visible\.dressAndLayers for "Ada"/); assert.match(repair, /visible\.dressAndLayers for "Fox"/);
+  assert.ok(!repair.includes('visible.dressAndLayers for "Traveler"'));
+  assert.equal(state.characters[0].visible.dressAndLayers, "Plain work shirt and trousers");
+  assert.equal(state.characters[0].internal.mood, "Unknown");
+  assert.equal(state.characters.find(char => char.name === "Fox").visible.dressAndLayers, "Not applicable; a wild fox without clothing");
+  assert.equal(state.characters.find(char => char.controller === "user").visible.dressAndLayers, "Unknown");
 });
 
 test("optional scene filling shares the extraction call and retains partial established scene values", async () => {
@@ -64,9 +94,14 @@ test("optional scene filling shares the extraction call and retains partial esta
 test("routine requests use extracted profiles and exclude raw cards while initialization retains sources", async () => {
   const sources = structuredClone(SOURCES); sources.cards[0].description += " RAW_CARD_ONLY_SENTINEL."; sources.cards[0].exampleDialogue = "EXAMPLE_ONLY_SENTINEL"; sources.selectedOpening = "OPENING_ONLY_SENTINEL";
   const previous = fixtureState(); previous.characters[0].profile.relationshipContext = "Longstanding station partnership"; previous.characters[0].profile.boundaries = "Do not open the private locker";
-  const requests = [], api = { connections: { list: async () => [] }, generate: { quiet: async input => { requests.push(input); return { content: JSON.stringify(modelOutput(previous, { initialize: input.messages[1].content.startsWith("INITIALIZE") })) }; } } };
+  previous.characters[0].visible.dressAndLayers = "Unknown";
+  const requests = [], api = { connections: { list: async () => [] }, generate: { quiet: async input => {
+    requests.push(input); const initialize = input.messages[1].content.startsWith("INITIALIZE");
+    return { content: JSON.stringify(modelOutput(initialize ? fixtureState() : previous, { initialize })) };
+  } } };
   await runTracker(api, { initialize: true, sources, sourceMessageId: "card-baseline" }, {}, "owner");
-  await runTracker(api, { sources, previousState: previous, userText: "Hello", assistantText: "Ada nods.", sourceMessageId: "a1" }, {}, "owner");
+  const next = await runTracker(api, { sources, previousState: previous, userText: "Hello", assistantText: "Ada nods.", sourceMessageId: "a1" }, {}, "owner");
+  assert.equal(next.characters[0].visible.dressAndLayers, "Unknown"); assert.equal(requests.length, 2);
   const initial = requests[0].messages[1].content, routine = requests[1].messages[1].content;
   for (const sentinel of ["RAW_CARD_ONLY_SENTINEL", "EXAMPLE_ONLY_SENTINEL", "OPENING_ONLY_SENTINEL"]) { assert.ok(initial.includes(sentinel)); assert.ok(!routine.includes(sentinel)); }
   assert.ok(routine.includes("Longstanding station partnership")); assert.ok(routine.includes("Do not open the private locker"));

@@ -134,8 +134,8 @@ export function setup(ctx) {
     input.checked = fillMissingSceneDetails;
     input.addEventListener("change", () => { fillMissingSceneDetails = input.checked; sceneChoiceDirty = true; updateButtons(); });
     label.append(input, element("span", "", "Fill missing scene details"));
-    root.append(element("div", "sce-hint", "Missing date, time, and weather are filled automatically."), label,
-      element("div", "sce-hint", "Outfit, minor grooming, atmosphere, and mild mood."));
+    root.append(element("div", "sce-hint", "Auto-fill missing date, time, weather, and outfits."), label,
+      element("div", "sce-hint", "Minor grooming, atmosphere, and mild mood."));
     return { root, input };
   }
   const drawerSceneOptions = sceneOptions(); setupSection.insertBefore(drawerSceneOptions.root, setupFeedback);
