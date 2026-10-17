@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 const root = new URL("../", import.meta.url);
-const files = ["clock.js", "schemas.js", "protocol.js", "aliases.js", "render.js", "context.js", "diagnostics.js", "state.js", "tracker.js", "backend.js"];
+const files = ["clock.js", "schemas.js", "protocol.js", "aliases.js", "partial.js", "render.js", "context.js", "diagnostics.js", "state.js", "tracker.js", "backend.js"];
 const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
 const bundleModule = async file => (await readFile(new URL(`src/${file}`, root), "utf8")).replace(/^import\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];\s*/gm, "").replace(/^export[ \t]+/gm, "");
 const parts = [];

@@ -1,7 +1,7 @@
 import { TRACKER_OUTPUT_JSON_SCHEMA } from "./schemas.js";
 import { normalizeStoryClockValue } from "./clock.js";
 
-export const TRACKER_CONTRACT_VERSION = 8;
+export const TRACKER_CONTRACT_VERSION = 9;
 export const TRACKER_COLLECTIONS = ["characters", "relationships", "places", "objectives"];
 
 export class TrackerValidationError extends Error {
@@ -81,9 +81,10 @@ export function expandTrackerRecord(candidate, kind, prior, identity = {}) {
     if (!Array.isArray(candidate.changes)) throw new Error("changes must be an array");
     const allowed = new Set(trackerFieldPaths(kind)), seen = new Set();
     for (const change of candidate.changes) {
-      if (!change || Object.keys(change).length !== 2 || !Object.hasOwn(change, "field") || typeof change.value !== "string") throw new Error("each change requires a field and a text value");
+      if (!change || Object.keys(change).length !== 2 || !Object.hasOwn(change, "field") || typeof change.value !== "string") throw Object.assign(new Error("each change requires a field and a text value"),
+        { field: allowed.has(change?.field) ? change.field : undefined, code: "invalid_change" });
       if (!allowed.has(change.field)) throw new Error(`unsupported change field ${JSON.stringify(change.field)}`);
-      if (seen.has(change.field)) throw new Error(`duplicate change field ${JSON.stringify(change.field)}`);
+      if (seen.has(change.field)) throw Object.assign(new Error(`duplicate change field ${JSON.stringify(change.field)}`), { field: change.field, code: "duplicate_change" });
       seen.add(change.field);
       const keys = change.field.split("."), key = keys.pop();
       let target = result;

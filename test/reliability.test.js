@@ -98,20 +98,22 @@ test("targeted repair fixes every rejected record and retains unrelated validate
   assert.equal(h.diagnostics.at(-1).attempts[0].issues.length, 2);
 });
 
-test("failed or incomplete repairs cannot drop a rejected relationship or mutate the saved state", async () => {
+test("incomplete repairs retain the saved relationship while committing independent changes", async () => {
   const previous = cast(), before = structuredClone(previous);
   const rejected = output({ characters: [patch("c1", [["visible.items", "A new bag"]])], relationships: [patch("r1", [["toId", "new_n2"]])] });
   const h = mock([{ content: JSON.stringify(rejected) }, { content: JSON.stringify(output()) }]);
-  await assert.rejects(h.run(previous), /omitted rejected relationships record r1/);
-  assert.deepEqual(previous, before); assert.equal(h.diagnostics.at(-1).outcome, "failed");
+  const next = await h.run(previous);
+  assert.deepEqual(next.relationships, previous.relationships); assert.equal(next.characters[0].visible.items, "A new bag");
+  assert.deepEqual(previous, before); assert.equal(h.diagnostics.at(-1).outcome, "partial");
 });
 
 test("a repair that fixes only the first invalid reference still reports the remaining failure precisely", async () => {
   const rejected = output({ relationships: [patch("r1", [["fromId", "c99"], ["toId", "new_u1"]])] });
   const repair = output({ relationships: [patch("r1", [["fromId", "c1"], ["toId", "new_u1"]])] });
   const h = mock([{ content: JSON.stringify(rejected) }, { content: JSON.stringify(repair) }]);
-  await assert.rejects(h.run(), /relationships\[0\]\.toId.*new_u1/);
+  const next = await h.run(); assert.deepEqual(next.relationships, cast().relationships);
   assert.equal(h.requests.length, 2); assert.equal(h.diagnostics.at(-1).attempts[1].issues.length, 1);
+  assert.equal(h.diagnostics.at(-1).outcome, "partial"); assert.match(h.diagnostics.at(-1).unresolved.issues[0].path, /toId/);
 });
 
 test("empty, malformed, wrong-type, reasoning-only and truncated responses preserve repair evidence", async () => {

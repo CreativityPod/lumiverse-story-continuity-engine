@@ -136,7 +136,7 @@ export function decodeModelOutput(output, registry, { sourceMessageId = "card-ba
   if (output.schemaVersion !== TRACKER_SCHEMA_VERSION) throw new Error(`Tracker object must have schemaVersion ${TRACKER_SCHEMA_VERSION}`);
   if (Object.keys(output).some(key => !["schemaVersion", "world", ...TRACKER_COLLECTIONS].includes(key))) throw new Error("Tracker object has unexpected root fields");
   const decoded = structuredClone(output), declaredNew = new Set(), resolved = new Map(), issues = [];
-  const issue = (kind, index, alias, path, error, code = "invalid_record") => issues.push({ kind, index, recordId: alias, path: error.path ?? path,
+  const issue = (kind, index, alias, path, error, code = "invalid_record") => issues.push({ kind, index, recordId: alias, path: error.path ?? (error.field ? `${path}.${error.field}` : path),
     code: error.code ?? code, message: String(error.message ?? error).slice(0, 1000) });
   const modelPrior = (kind, record) => {
     if (!record?.prior) return null;

@@ -377,6 +377,67 @@ test("failed tracker retains only the last valid branch prefix and injection rem
   assert.ok(result.messages[0].content.includes("using last valid checkpoint"));
 });
 
+test("partial turns persist, allow later tracking, and retry only unresolved fields before replay", async () => {
+  const h = harness(), initial = fixtureState();
+  const mira = structuredClone(initial.characters[0]); mira.id = "npc:mira"; mira.role = "npc"; mira.name = "Mira";
+  initial.characters.push(mira); initial.relationships.push({ id: "rel:mira", fromId: "char:ada", toId: mira.id,
+    publicStatus: "Colleagues", privateState: "Cautious trust", boundaryOrConcern: "Unknown", sourceMessageId: "card-baseline" });
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput(initial, { initialize: true })) })); await h.select();
+  h.addTurn("Ada and Mira talk while Ada removes her coat.");
+  const bad = { schemaVersion: 3, world: { action: "update", changes: [{ field: "time", value: "21:05" }] },
+    characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "Early thirties" }, { field: "visible.dressAndLayers", value: "White shirt; coat on bench" }] }],
+    relationships: [{ id: "r1", action: "update", changes: [{ field: "privateState", value: "" }] }], places: [], objectives: [] };
+  h.setResponse(async () => ({ content: JSON.stringify(bad) })); await h.engine.schedule("chat", {}, "owner");
+  const partial = await h.engine.loadStore("chat"); assert.equal(partial.lastError, ""); assert.equal(partial.rejectedTurn, null);
+  assert.equal(partial.current.characters[0].profile.age, "Early thirties"); assert.equal(partial.current.characters[0].visible.dressAndLayers, "White shirt; coat on bench");
+  assert.equal(partial.current.relationships[0].privateState, "Cautious trust"); assert.ok(partial.checkpoints["a1::0"].partial);
+  const status = await h.engine.status("chat", "owner"); assert.equal(status.code, "partial"); assert.equal(status.trackerInfo.retryPaused, false);
+  assert.match(status.partialUpdates[0].fields[0], /privateState/); assert.equal(partial.trackerMetrics.partial, 1);
+  h.addTurn("A later conversation between Ada and Mira.", "a2");
+  const later = { schemaVersion: 3, world: { action: "update", changes: [{ field: "time", value: "22:00" }] }, characters: [], relationships: [], places: [], objectives: [] };
+  h.setResponse(async () => ({ content: JSON.stringify(later) })); await h.engine.schedule("chat", {}, "owner");
+  assert.equal((await h.engine.loadStore("chat")).lastTrackedMessageId, "a2");
+  const restarted = createStoryEngine(h.api); await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
+  assert.equal(h.requests.length, 4); assert.equal((await restarted.status("chat", "owner")).code, "partial");
+  const copied = h.messages.get("chat").slice(0, h.messages.get("chat").findIndex(message => message.id === "a1") + 1);
+  const map = Object.fromEntries(copied.map(message => [message.id, `fork-${message.id}`]));
+  h.messages.set("fork", copied.map(message => ({ ...structuredClone(message), id: map[message.id] }))); h.chats.set("fork", { id: "fork", character_id: "ada" });
+  await restarted.inheritFork({ sourceChatId: "chat", forkedChatId: "fork", forkedAtMessageId: "a1", messageIdMap: map }, "owner");
+  const fork = await restarted.loadStore("fork"); assert.equal(fork.checkpoints["fork-a1::0"].partial.sourceMessageId, "fork-a1");
+  assert.equal((await restarted.status("fork", "owner")).code, "partial"); assert.equal(h.requests.length, 4);
+  h.setResponse(async request => {
+    if (request.messages[1].content.startsWith("RETRY INCOMPLETE")) return { content: JSON.stringify({ ...bad,
+      relationships: [{ id: "r1", action: "update", changes: [{ field: "privateState", value: "Relaxed trust" }] }],
+      characters: [{ id: "c1", action: "update", changes: [{ field: "profile.age", value: "99" }, { field: "visible.dressAndLayers", value: "Wrong coat" }] }] }) };
+    return { content: JSON.stringify(later) };
+  });
+  await restarted.handleFrontend({ type: "story_retry_partial", chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, 6);
+  const fixed = await restarted.loadStore("chat"); assert.equal(fixed.current.relationships[0].privateState, "Relaxed trust");
+  assert.equal(fixed.current.characters[0].profile.age, "Early thirties"); assert.equal(fixed.current.characters[0].visible.dressAndLayers, "White shirt; coat on bench");
+  assert.equal(fixed.current.world.time, "22:00"); assert.equal((await restarted.status("chat", "owner")).code, "active");
+  assert.equal(fixed.checkpoints["a1::0"].partial, null);
+});
+
+test("optional setup failures save profiles while malformed retry cannot remove an accepted partial checkpoint", async () => {
+  const h = harness(), initial = fixtureState();
+  const mira = structuredClone(initial.characters[0]); mira.id = "npc:mira"; mira.role = "npc"; mira.name = "Mira";
+  initial.characters.push(mira); initial.relationships.push({ id: "rel:mira", fromId: "char:ada", toId: mira.id,
+    publicStatus: "Colleagues", privateState: "", boundaryOrConcern: "Unknown", sourceMessageId: "card-baseline" });
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput(initial, { initialize: true })) })); await h.select();
+  const saved = await h.engine.loadStore("chat"); assert.ok(saved.baseline); assert.ok(saved.baselinePartial); assert.equal(saved.current.relationships[0].privateState, "Unknown");
+  assert.equal((await h.engine.status("chat", "owner")).code, "partial");
+  h.setResponse(async () => ({ content: "unreadable" })); await h.engine.handleFrontend({ type: "story_retry_partial", chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.ok, false); const failed = await h.engine.loadStore("chat");
+  assert.deepEqual(failed.current, saved.current); assert.deepEqual(failed.baselinePartial, saved.baselinePartial); assert.equal(failed.rejectedTurn, null);
+  h.setResponse(async () => ({ content: JSON.stringify({ schemaVersion: 3, world: { action: "preserve", changes: [] }, characters: [],
+    relationships: [{ id: "r1", action: "update", changes: [{ field: "privateState", value: "Cautious trust" }] }], places: [], objectives: [] }) }));
+  await h.engine.handleFrontend({ type: "story_retry_partial", chatId: "chat" }, "owner");
+  const fixed = await h.engine.loadStore("chat"); assert.equal(fixed.current.relationships[0].privateState, "Cautious trust");
+  assert.equal(fixed.baselinePartial, null); assert.equal((await h.engine.status("chat", "owner")).code, "active");
+  assert.equal(fixed.initialSetup.state.relationships[0].privateState, "Cautious trust");
+});
+
 test("rejected turns pause automatic calls across events and restart until explicitly reprocessed", async () => {
   const h = harness(); await h.select(); const initial = await h.engine.loadStore("chat");
   h.addTurn("Ada nods."); h.setResponse(async () => ({ content: "invalid" }));
@@ -543,9 +604,9 @@ test("GUID-backed saves inject only aliases and rejected alias typos cannot comm
   });
   await h.engine.schedule("chat", {}, "owner");
   const failed = await h.engine.loadStore("chat");
-  assert.equal(h.requests.length, 3); assert.match(failed.lastError, /unknown/); assert.ok(!failed.checkpoints["a1::0"]);
+  assert.equal(h.requests.length, 3); assert.equal(failed.lastError, ""); assert.ok(failed.checkpoints["a1::0"].partial);
   assert.deepEqual(failed.current, initial.current); assert.equal(failed.current.characters.length, 1);
-  assert.equal(failed.revision, initial.revision);
+  assert.equal(failed.revision, initial.revision + 1);
   assert.ok(h.variables.get(`chat:${CHAT_KEYS.state}`).includes(guid));
 });
 

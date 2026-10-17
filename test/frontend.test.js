@@ -95,6 +95,19 @@ test("drawer displays age/gender and provides a scoped action for older chats", 
   } finally { h.restore(); }
 });
 
+test("partial tracking has a warning, retained snapshot and explicit retry without blocking later turns", () => {
+  const h = mountHarness();
+  try {
+    h.status({ code: "partial", level: "amber", text: "Tracking partially updated.", partialUpdates: [{ sourceMessageId: "a1", fields: ["relationships[0].privateState"] }] });
+    assert.ok(document.body.textContent.includes("Blue coat")); assert.ok(document.body.textContent.includes("Valid updates are saved"));
+    assert.ok(document.body.textContent.includes("Later turns can continue")); assert.ok(document.body.textContent.includes("relationships[0].privateState"));
+    const retry = h.button("Retry Incomplete Tracking"); assert.equal(retry.hidden, false); assert.equal(retry.disabled, false); retry.click();
+    assert.equal(h.sent.at(-1).type, "story_retry_partial");
+    h.status({ processing: true, partialUpdates: [{ sourceMessageId: "a1", fields: ["relationships[0].privateState"] }] }); assert.equal(retry.disabled, true);
+    h.status({ partialUpdates: [] }); assert.equal(retry.hidden, true);
+  } finally { h.restore(); }
+});
+
 test("drawer preserves unsaved settings and sends one concrete settings payload", () => {
   const h = mountHarness();
   try {

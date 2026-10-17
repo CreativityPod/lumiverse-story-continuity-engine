@@ -1,3 +1,4 @@
+import { normalizePartialUpdate } from "./partial.js";
 import { cloneEmptyState, validateState, remapStateSources } from "./schemas.js";
 import { buildRoleplayContext } from "./context.js";
 import { renderContinuityContext } from "./render.js";
@@ -106,8 +107,8 @@ export function listEligibleTurns(messages, context = transcriptContext(messages
 
 export function createStore(chatId) {
   return { schemaVersion: 1, chatId, sources: null, sourceFingerprint: "", pendingCardFingerprint: "", epoch: "", baseline: null,
-    initialSetup: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
-    setupDraft: null, initialWorldDefaults: null, trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
+    initialSetup: null, baselinePartial: null, current: null, checkpoints: {}, revision: 0, lastRevisionAt: "", processing: false, lastError: "", rejectedTurn: null, blocked: "",
+    setupDraft: null, initialWorldDefaults: null, trackerDiagnostics: null, trackerMetrics: { firstPass: 0, repaired: 0, partial: 0, failed: 0, elapsedMs: 0, completionTokens: 0 },
     lastTrackedMessageId: "", initializationMode: "", fillMissingSceneDetails: false, setupProgress: null, awaitingSetup: false, setupTargetMessageId: null, setupNoticeId: null, setupNoticeShown: false };
 }
 
@@ -118,6 +119,7 @@ export function normalizeStore(value, chatId) {
   const initialWorldDefaults = normalizeInitialWorldDefaults(value.initialWorldDefaults?.values);
   next.initialWorldDefaults = initialWorldDefaults && value.initialWorldDefaults.sourceFingerprint === next.sourceFingerprint
     ? { sourceFingerprint: next.sourceFingerprint, values: initialWorldDefaults } : null;
+  next.baselinePartial = normalizePartialUpdate(value.baselinePartial);
   next.trackerDiagnostics = normalizeTrackerDiagnostics(value.trackerDiagnostics);
   next.trackerMetrics = Object.fromEntries(Object.keys(empty.trackerMetrics).map(key => [key, Number.isFinite(value.trackerMetrics?.[key]) && value.trackerMetrics[key] >= 0 ? value.trackerMetrics[key] : 0]));
   next.lastTrackedMessageId = typeof value.lastTrackedMessageId === "string" ? value.lastTrackedMessageId.slice(0, 180) : "";
@@ -151,7 +153,7 @@ export function normalizeStore(value, chatId) {
   try {
     for (const key of ["baseline", "current"]) if (next[key]) next[key] = validateState(next[key]);
   } catch {
-    next.baseline = next.current = next.initialSetup = null;
+    next.baseline = next.current = next.initialSetup = next.baselinePartial = null;
     next.checkpoints = {};
     next.rejectedTurn = null;
     next.lastError = "Invalid saved state was discarded; continuity will rebuild from the selected transcript.";
@@ -168,7 +170,7 @@ export function validCheckpointPrefix(store, turns) {
     try {
       previousState = validateState(checkpoint.state, { allowedSourceMessageIds: ["card-baseline", ...(store.epoch.startsWith("import:") ? [store.epoch.slice(7)] : []), ...turns.slice(0, count + 1).map(item => String(item.assistant.id))] });
     } catch { break; }
-    checkpoints[turn.key] = { ...checkpoint, state: previousState };
+    checkpoints[turn.key] = { ...checkpoint, state: previousState, partial: normalizePartialUpdate(checkpoint.partial) };
     count++;
   }
   return { previousState, count, checkpoints };

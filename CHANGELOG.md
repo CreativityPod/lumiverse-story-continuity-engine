@@ -1,3 +1,10 @@
+# 1.7.1
+
+- Save independently valid tracker changes when the single repair cannot fix every component. Invalid fields retain prior values; valid profile, clothing, clock and relationship changes survive unrelated failures. Usable original output can also survive a malformed or unavailable repair.
+- Keep identity/reference dependents, proposed physical transitions and date/time rollovers together. Revalidate the retained full state, scope and selected branch before saving. Unrecoverable output and required initial-scene failures retain the existing pause/preview behavior.
+- Add persistent Partial warnings and Retry Incomplete Tracking. Corrections can change only unresolved components of the original checkpoint; later turns replay from that correction when needed. Tracking can continue after partial saves, and warnings survive restarts and valid forks.
+- Add partial diagnostics/totals and regression coverage for the reported privateState error, incomplete repairs, dependencies, retry isolation, new-record identities, baseline readiness, persistence and drawer controls. Tracker contract is now 9; canonical schema, macros and portable formats are unchanged, with no migration required.
+
 # 1.7.0
 
 - Add separate text profile.age/profile.gender fields for all characters. Extract established facts from cards/openings/lore; allow descriptive ages, ranges, ageless/apparent-age wording and Unknown. Never invent these fields as scene defaults or infer them from appearance/names/stereotypes.

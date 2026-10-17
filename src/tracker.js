@@ -2,6 +2,7 @@ import { TRACKER_SCHEMA_VERSION, TRACKER_OUTPUT_JSON_SCHEMA, TrackerScopeError, 
 import { buildRoutineTrackerContext } from "./context.js";
 import { createAliasRegistry, encodeModelState, encodeModelSources, encodeModelReferences, modelAliasCatalog, aliasOutputSchema, decodeModelOutput } from "./aliases.js";
 import { TRACKER_CONTRACT_VERSION, TRACKER_COLLECTIONS, TrackerValidationError, trackerFieldPaths } from "./protocol.js";
+import { recoverPartialTrackerOutput, scopePartialRetry } from "./partial.js";
 import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 import { createInitialWorldDefaults, normalizeInitialWorldDefaults } from "./clock.js";
 
@@ -125,7 +126,7 @@ function targetedRepairPlan(parsed, error, registry) {
   return { targets, fields };
 }
 
-function mergeTrackerRepair(original, repaired, plan, registry) {
+function mergeTrackerRepair(original, repaired, plan, registry, { partial = false } = {}) {
   if (!plan) return repaired;
   const { targets, fields } = plan;
   if (!repaired || typeof repaired !== "object" || Array.isArray(repaired)) throw new Error("Repair must return a JSON object");
@@ -140,26 +141,27 @@ function mergeTrackerRepair(original, repaired, plan, registry) {
       return value === undefined ? [] : [{ field, value }];
     });
     const replaced = new Set(replacement.changes.map(change => change.field));
-    for (const field of rejectedFields) if (!replaced.has(field)) throw new Error(`Repair omitted rejected field ${kind}.${field}; return an explicit valid value`);
+    for (const field of rejectedFields) if (!partial && !replaced.has(field)) throw new Error(`Repair omitted rejected field ${kind}.${field}; return an explicit valid value`);
     return { ...replacement, changes: [...priorChanges.filter(change => !replaced.has(change.field)), ...replacement.changes] };
   };
   if (targets.world.size) {
-    if (!repaired.world || repaired.world.action !== "update") throw new Error("Repair must replace the rejected world changes");
-    merged.world = replaceRecord(original.world, repaired.world, "world", "world");
+    if (!repaired.world || repaired.world.action !== "update") {
+      if (!partial) throw new Error("Repair must replace the rejected world changes");
+    } else merged.world = replaceRecord(original.world, repaired.world, "world", "world");
   }
   for (const kind of TRACKER_COLLECTIONS) {
     const replacements = repaired[kind] ?? [];
     if (!Array.isArray(replacements)) throw new Error(`Repair ${kind} must be an array`);
     const ids = replacements.map(entry => typeof entry?.id === "string" ? entry.id.trim() : null);
     if (new Set(ids).size !== ids.length || ids.includes(null)) throw new Error(`Repair ${kind} has invalid or duplicate aliases`);
-    for (const id of targets[kind]) if (!ids.includes(id)) throw new Error(`Repair omitted rejected ${kind} record ${id}; correct it explicitly rather than dropping it`);
+    for (const id of targets[kind]) if (!partial && !ids.includes(id)) throw new Error(`Repair omitted rejected ${kind} record ${id}; correct it explicitly rather than dropping it`);
     const originalRecords = merged[kind] ?? [], originalIds = new Set(originalRecords.map(entry => entry.id?.trim()));
     const replacementsById = new Map(replacements.map(entry => [entry.id.trim(), entry]));
     // Replace in place: moving repaired records to the end would reorder the
     // saved cast and could renumber NPC/user aliases on the next request.
     const retained = originalRecords.map(entry => {
       const id = entry.id?.trim();
-      return targets[kind].has(id) ? replaceRecord(entry, replacementsById.get(id), kind, id) : entry;
+      return targets[kind].has(id) && replacementsById.has(id) ? replaceRecord(entry, replacementsById.get(id), kind, id) : entry;
     });
     // Already validated records are frozen. New declarations may supply missing
     // dependencies; all merged references are validated again before commit.
@@ -199,18 +201,24 @@ export async function runTracker(api, input, rawConfig, userId) {
     diagnostics.outcome = outcome; diagnostics.elapsedMs = Date.now() - diagnostics.startedAt;
     await input.onDiagnostic?.(normalizeTrackerDiagnostics(diagnostics));
   };
-  const routine = input.initialize ? null : buildRoutineTrackerContext(input);
+  const routine = input.initialize ? null : input.retryPartial
+    ? { state: trackerStateForLlm(input.previousState), references: [], allowedUpdateIds: undefined } : buildRoutineTrackerContext(input);
   const scope = { allowedUpdateIds: routine?.allowedUpdateIds };
   const registry = createAliasRegistry(input.sources, input.previousState), schema = aliasOutputSchema(registry, { ...scope, patches: true });
+  const retryTargets = input.retryPartial?.issues.map(issue => ({ kind: issue.kind,
+    alias: issue.kind === "world" ? "world" : registry.forward[issue.kind]?.get(issue.id) ?? issue.alias,
+    fields: issue.fields, code: issue.code }));
   const catalog = `SUPPLIED ID ALIASES (canUpdate false means reference-only: omit that entity record; creation aliases require a genuinely new identity and action update)\n${JSON.stringify(modelAliasCatalog(registry, scope))}`;
-  const content = input.initialize
+  const content = input.retryPartial
+    ? `RETRY INCOMPLETE TRACKING. Valid changes from this turn are already saved in PREVIOUS SAVED STATE. Correct ONLY the listed unresolved fields/records; preserve every other saved value. Do not advance time or repeat completed actions again. Return explicit corrections, and declare any newly required character before referencing it.\nUNRESOLVED COMPONENTS\n${JSON.stringify(retryTargets)}\nPREVIOUS SAVED STATE\n${JSON.stringify(encodeModelState(trackerStateForLlm(input.previousState), registry))}\n${input.initialize ? `ORIGINAL CARD SOURCES\n${JSON.stringify(encodeModelSources(input.sources, registry))}` : `ORIGINAL COMPLETED USER TURN\n${registry.rewriteText(input.userText ?? "")}\nORIGINAL COMPLETED ASSISTANT TURN\n${registry.rewriteText(input.assistantText ?? "")}`}`
+    : input.initialize
     ? input.refreshProfiles
       ? `${input.refreshIdentityOnly
         ? "FILL MISSING AGE AND GENDER ONLY. Extract only explicitly established profile.age and profile.gender from the saved source definitions for existing characters. Keep unsupported values Unknown, including descriptive ages. Preserve every known value, all other fields, cast and scene. Do not create entities or resample starting conditions. Return only these two profile field changes; use empty collections/preserve for everything else."
         : "REFRESH MISSING STABLE PROFILE FACTS FROM SAVED CARD SOURCES. Preserve the imported baseline's established facts, scene, positions, clothing, relationships and private state. Fill missing stable profile fields conservatively from the source definitions; use Unknown when unsupported. Include every card character with its supplied alias."}\nORIGINAL CARD SOURCES\n${JSON.stringify(encodeModelSources(input.sources, registry))}\n${input.refreshIdentityOnly ? "CURRENT SAVED STATE" : "IMPORTED BASELINE"}\n${JSON.stringify(encodeModelState(trackerStateForLlm(input.previousState), registry))}`
       : `INITIALIZE FROM CARD SOURCES. Extract the stable profiles, appearance, initial internal state, recurring characters, and opening scene. Include every card character with its supplied c alias. Do not invent a user profile.\n${JSON.stringify(encodeModelSources(input.sources, registry))}`
     : `PREVIOUS SELECTED PRIVATE STATE (includes extracted stable profiles; omitted entities remain saved)\n${JSON.stringify(encodeModelState(routine.state, registry))}\nTARGETED ORIGINAL SOURCE REFERENCES (only relevant facts not covered by extracted profiles; current state takes precedence)\n${JSON.stringify(encodeModelReferences(routine.references, registry))}\nCOMPLETED USER TURN\n${registry.rewriteText(input.userText || "[none]")}\nCOMPLETED ASSISTANT TURN${input.isOpening ? " (selected opening; do not advance its starting clock again)" : ""}\n${registry.rewriteText(input.assistantText)}`;
-  const scenePolicy = input.initialize && !input.refreshProfiles ? initialScenePolicy(input.fillMissingSceneDetails === true) : "";
+  const scenePolicy = input.initialize && !input.refreshProfiles && !input.retryPartial ? initialScenePolicy(input.fillMissingSceneDetails === true) : "";
   const initialWorldDefaults = scenePolicy ? normalizeInitialWorldDefaults(input.initialWorldDefaults) ?? createInitialWorldDefaults() : null;
   const setupChecklist = scenePolicy ? `\nINITIAL SETUP OUTPUT CHECKLIST: This is initialization, not a routine delta. Extract source-established world.date, world.time and world.weather first; preserve partial/approximate values, fictional calendars and explicit absence of ordinary weather. Choose only wholly missing fields together as coherent starting conditions under INITIAL SCENE DEFAULTS, with concise contextual weather, and return them explicitly. Saved fictional anchors and last-resort backend defaults: ${JSON.stringify(initialWorldDefaults)}. Use the saved date/time when unconstrained; adapt only missing fields to source constraints rather than resampling arbitrary alternatives. Include a non-Unknown visible.dressAndLayers for every model-controlled character you declare, preserving source clothing or choosing a compatible missing starting outfit under INITIAL SCENE DEFAULTS. The optional scene-details checkbox controls only grooming, mild mood and extra atmosphere; it does not disable starting conditions or outfits. Never choose user-controlled clothing or internal state. Include all supported profile and appearance facts as well. Required card records: ${JSON.stringify((input.sources.cards ?? []).map(card => ({ id: registry.aliasFor("characters", `char:${card.id}`), name: card.name, requiredChanges: ["visible.dressAndLayers"] })))}. Declare any referenced new user/NPC in characters in this same response.` : "";
   const choices = "CONTROLLED VALUES: world sceneStatus must be active or ended (active for an ongoing/opening scene; ended only when the scene explicitly ends). Objective status must be active, completed or abandoned. Never use Unknown or a description for these status fields; omit an unsupported change instead. Character role/controller come from the supplied identity.";
@@ -225,6 +233,19 @@ export async function runTracker(api, input, rawConfig, userId) {
     return dto;
   };
   let diagnostic = "", repairOriginal = null, repairTargets = null;
+  const candidates = [];
+  const recover = async () => {
+    if (input.refreshProfiles) return null;
+    for (const candidate of candidates) {
+      const scoped = input.retryPartial ? scopePartialRetry(candidate, input.retryPartial, registry) : { output: candidate, pendingIssues: [] };
+      const recovered = recoverPartialTrackerOutput(scoped.output, registry, { ...scope, sourceMessageId: input.sourceMessageId, requireInitialScene: Boolean(scenePolicy), initialWorldDefaults, pendingIssues: scoped.pendingIssues });
+      if (!recovered || input.sources.cards.some(card => !recovered.state.characters.some(char => char.id === `char:${card.id}` && char.role === "main"))) continue;
+      diagnostics.unresolved = recovered.partial;
+      await input.onPartial?.(recovered.partial); await report("partial");
+      return recovered.state;
+    }
+    return null;
+  };
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt) await input.onProgress?.({ stage: "repairing", attempt: 2 });
     const started = Date.now();
@@ -234,6 +255,7 @@ export async function runTracker(api, input, rawConfig, userId) {
       const category = signal.aborted || /abort|timeout/i.test(error.name ?? "") ? "timeout" : "transport";
       diagnostics.attempts.push({ attempt: attempt + 1, category, finishReason: "unavailable", elapsedMs: Date.now() - started,
         issues: [{ path: "generation", code: category, message: String(error.message ?? error) }] });
+      const partialState = await recover(); if (partialState) return partialState;
       await report("failed");
       throw Object.assign(new Error(`Tracker generation failed (${category}): ${String(error.message ?? error)}`), { code: "TRACKER_GENERATION_FAILED", diagnostics: normalizeTrackerDiagnostics(diagnostics) });
     }
@@ -245,6 +267,10 @@ export async function runTracker(api, input, rawConfig, userId) {
     try {
       if (inspected.message) throw new Error(inspected.message);
       if (attempt) parsed = mergeTrackerRepair(repairOriginal, parsed, repairTargets, registry);
+      candidates.unshift(structuredClone(parsed));
+      const retry = input.retryPartial ? scopePartialRetry(parsed, input.retryPartial, registry) : { output: parsed, pendingIssues: [] };
+      parsed = retry.output;
+      if (retry.pendingIssues.length) throw new Error("Retry omitted unresolved fields or records; their previous values were retained");
       const state = materializeTrackerOutput(decodeModelOutput(parsed, registry, { sourceMessageId: input.sourceMessageId, requireInitialScene: Boolean(scenePolicy), initialWorldDefaults }), input.previousState, input.sourceMessageId, scope);
       candidateState = state;
       for (const card of input.sources.cards) if (!state.characters.some(char => char.id === `char:${card.id}` && char.role === "main")) throw new Error("Every card character must be recorded with its exact id and main role");
@@ -252,6 +278,9 @@ export async function runTracker(api, input, rawConfig, userId) {
       await report(attempt ? "repaired" : "first_pass");
       return state;
     } catch (error) {
+      if (attempt && !inspected.message && repairTargets) {
+        try { candidates.unshift(mergeTrackerRepair(repairOriginal, inspected.parsed, repairTargets, registry, { partial: true })); } catch { /* Keep the first usable candidate. */ }
+      }
       diagnostic = registry.rewriteText(error.message);
       detail.category = inspected.message ? inspected.category : "state_validation";
       detail.issues = error.issues ?? [{ path: "state", code: "state_validation", message: diagnostic }];
@@ -273,6 +302,7 @@ export async function runTracker(api, input, rawConfig, userId) {
       }
     }
   }
+  const partialState = await recover(); if (partialState) return partialState;
   await report("failed");
   const last = diagnostics.attempts.at(-1);
   throw Object.assign(new Error(`Tracker state rejected after one repair: ${diagnostic}; finish=${last.finishReason}; contentChars=${last.contentChars}; toolCalls=${last.toolCalls}`),
