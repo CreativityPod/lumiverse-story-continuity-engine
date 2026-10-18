@@ -1,3 +1,9 @@
+# 1.7.3
+
+- Default tracker output to 16,384 tokens and allow up to 32,768 in both configuration validation and drawer controls. Default the tracker timeout to 300 seconds; preserve existing saved settings.
+- Raise the reconciliation budget from 240 to 300 seconds to match the configured timeout and manifest allowance. Generation and its single repair continue to share the remaining deadline; completed catch-up checkpoints remain resumable.
+- Retain and verify known AGE/GENDER in `story_continuity.visual_text_v1`; clarify that these two fields are included while other private profile data stays excluded. Existing chats can use Fill Missing Age / Gender for unknown values.
+
 # 1.7.2
 
 - Define relationship privateState as a concise current relationship summary, with separate guidance for publicStatus and boundaryOrConcern, asymmetric feelings, current commitments, uncertainty and user control. Consolidate selected existing recaps faithfully; keep scene context focused on current circumstances instead of accumulating past turns.

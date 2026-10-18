@@ -43,7 +43,7 @@ function mountHarness(native = false) {
   const destroy = setup(ctx);
   const status = overrides => backend({ type: "story_status", chatId: "chat",
     code: "active", level: "green", text: "Story continuity is current.", revision: 2, lastRevisionAt: "2026-10-13T16:00:00Z", snapshot: publicTrackerSnapshot(fixtureState()), canImport: true, canExport: true, canBegin: false, ...overrides,
-    config: { enabled: true, showStatusWidget: false, connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000, ...overrides?.config } });
+    config: { enabled: true, showStatusWidget: false, connectionId: "", outputMode: "auto", maxTokens: 16384, timeoutMs: 300000, ...overrides?.config } });
   const button = label => [...document.querySelectorAll("button")].find(button => button.textContent === label);
   const message = id => { const bubble = document.createElement("article"); document.body.prepend(bubble); bubbles.set(id, bubble); return bubble; };
   return { dom, ctx, sent, status, backend: payload => backend(payload), events, button, mounts, destroyed, widgets, injections, message, activated: () => activated,
@@ -126,8 +126,10 @@ test("drawer preserves unsaved settings and sends one concrete settings payload"
   const h = mountHarness();
   try {
     h.status(); const tokens = document.querySelector('[aria-label="Maximum tracker output tokens"]');
-    tokens.value = "9000"; tokens.dispatchEvent(new window.Event("change")); h.status({ revision: 3 }); assert.equal(tokens.value, "9000");
-    h.button("Save Settings").click(); const payload = h.sent.at(-1); assert.equal(payload.type, "story_save_config"); assert.equal(payload.config.maxTokens, 9000); assert.equal(payload.config.timeoutMs, 120000);
+    assert.equal(tokens.value, "16384"); assert.equal(tokens.max, "32768");
+    assert.equal(document.querySelector('[aria-label="Tracker timeout in seconds"]').value, "300");
+    tokens.value = "32768"; tokens.dispatchEvent(new window.Event("change")); h.status({ revision: 3 }); assert.equal(tokens.value, "32768");
+    h.button("Save Settings").click(); const payload = h.sent.at(-1); assert.equal(payload.type, "story_save_config"); assert.equal(payload.config.maxTokens, 32768); assert.equal(payload.config.timeoutMs, 300000);
   } finally { h.restore(); }
 });
 

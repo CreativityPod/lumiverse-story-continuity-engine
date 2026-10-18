@@ -6,13 +6,13 @@ import { recoverPartialTrackerOutput, scopePartialRetry, acceptedTrackerUpdates 
 import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 import { createInitialWorldDefaults, normalizeInitialWorldDefaults } from "./clock.js";
 
-export const DEFAULT_CONFIG = Object.freeze({ enabled: true, showStatusWidget: true, connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000 });
+export const DEFAULT_CONFIG = Object.freeze({ enabled: true, showStatusWidget: true, connectionId: "", outputMode: "auto", maxTokens: 16384, timeoutMs: 300000 });
 export const TRACKER_OUTPUT_MODES = ["auto", "openai", "openai-responses", "anthropic", "google", "plain"];
 export function normalizeConfig(value = {}) {
   const bound = (entry, fallback, min, max) => Number.isFinite(Number(entry)) ? Math.max(min, Math.min(max, Math.round(Number(entry)))) : fallback;
   return { enabled: value.enabled !== false, showStatusWidget: value.showStatusWidget !== false,
     connectionId: typeof value.connectionId === "string" ? value.connectionId : "", outputMode: TRACKER_OUTPUT_MODES.includes(value.outputMode) ? value.outputMode : "auto",
-    maxTokens: bound(value.maxTokens, 6144, 400, 16384), timeoutMs: bound(value.timeoutMs, 120000, 5000, 300000) };
+    maxTokens: bound(value.maxTokens, DEFAULT_CONFIG.maxTokens, 400, 32768), timeoutMs: bound(value.timeoutMs, DEFAULT_CONFIG.timeoutMs, 5000, 300000) };
 }
 
 export const TRACKER_SYSTEM_PROMPT = `You are the private continuity recorder for an ongoing fictional story using arbitrary character cards.

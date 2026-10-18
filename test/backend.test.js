@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
+import { DEFAULT_CONFIG } from "../src/tracker.js";
 import { formatStoryClockValue } from "../src/clock.js";
 import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns, fingerprint } from "../src/state.js";
 import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
@@ -49,6 +50,21 @@ function addLegacyNotice(h, phase = "ready", id = "legacy-notice") {
   const notice = { id, role: "system", content: INITIALIZATION_NOTICE_TEXT[phase], metadata: { story_continuity_notice: { version: 1, status: phase } } };
   h.messages.get("chat").push(notice); return notice;
 }
+
+test("tracker defaults reach generation and catch-up shares the 300-second reconciliation budget", async t => {
+  let now = Date.now();
+  const budgets = [];
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(AbortSignal, "timeout", ms => { budgets.push(ms); return new AbortController().signal; });
+  const h = harness(); await h.select();
+  assert.equal(h.requests[0].parameters.max_tokens, 16384);
+  assert.deepEqual(budgets, [300000]);
+  h.addTurn("Ada nods.", "a1"); h.addTurn("Ada looks at the clock.", "a2");
+  h.setResponse(async () => { now += 80000; return { content: JSON.stringify(modelOutput()) }; });
+  await h.engine.schedule("chat", {}, "owner");
+  assert.deepEqual(budgets, [300000, 300000, 220000]);
+  assert.equal((await h.engine.loadStore("chat")).lastTrackedMessageId, "a2");
+});
 
 test("failed response evidence stays private, persists across restart, and exposes pending/last tracked turns", async () => {
   const h = harness(); await h.select(); const previous = (await h.engine.loadStore("chat")).current;
@@ -311,7 +327,7 @@ test("upgrading the tracker contract releases an old rejection pause without rep
   const turns = listEligibleTurns(h.messages.get("chat")), turn = turns.at(-1);
   store.rejectedTurn.signature = fingerprint({ contract: 1, userId: "owner", epoch: store.epoch, sources: store.sourceFingerprint,
     previousState: store.baseline, turn: turn.fingerprint, focusCharacterId: turn.assistant.character_id,
-    connectionId: "", outputMode: "auto", maxTokens: 6144, timeoutMs: 120000 });
+    connectionId: "", outputMode: "auto", maxTokens: DEFAULT_CONFIG.maxTokens, timeoutMs: DEFAULT_CONFIG.timeoutMs });
   h.setResponse(null); const restarted = createStoryEngine(h.api);
   await restarted.schedule("chat", {}, "owner");
   assert.equal(h.requests.length, 4); assert.equal((await restarted.loadStore("chat")).lastError, "");

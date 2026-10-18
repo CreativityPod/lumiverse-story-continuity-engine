@@ -196,7 +196,7 @@ export function createStoryEngine(api) {
       }
     };
     processing.add(chatId);
-    const deadline = Date.now() + 240000;
+    const deadline = Date.now() + 300000;
     let initializationNotice = null, trackerAttempt = null, setupRun = false;
     try {
       const messages = await api.chat.getMessages(chatId);

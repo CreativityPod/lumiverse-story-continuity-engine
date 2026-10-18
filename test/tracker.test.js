@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runTracker, resolveOutputMode, normalizeConfig } from "../src/tracker.js";
+import { DEFAULT_CONFIG, runTracker, resolveOutputMode, normalizeConfig } from "../src/tracker.js";
 import { SOURCES, modelOutput, fixtureState, character } from "./fixtures.js";
 
-test("configuration bounds and Claude provider alias", () => {
+test("configuration defaults, bounds, saved settings and Claude provider alias", () => {
+  assert.equal(DEFAULT_CONFIG.maxTokens, 16384); assert.equal(DEFAULT_CONFIG.timeoutMs, 300000);
+  assert.deepEqual(normalizeConfig(), DEFAULT_CONFIG);
+  assert.deepEqual(normalizeConfig({ maxTokens: "invalid", timeoutMs: "invalid" }), DEFAULT_CONFIG);
   const config = normalizeConfig({ maxTokens: 99999, timeoutMs: 1 });
-  assert.equal(config.maxTokens, 16384); assert.equal(config.timeoutMs, 5000);
+  assert.equal(config.maxTokens, 32768); assert.equal(config.timeoutMs, 5000);
+  assert.equal(normalizeConfig({ maxTokens: 400, timeoutMs: 999999 }).timeoutMs, 300000);
+  const saved = normalizeConfig({ maxTokens: 6144, timeoutMs: 120000 });
+  assert.equal(saved.maxTokens, 6144); assert.equal(saved.timeoutMs, 120000);
   assert.equal(resolveOutputMode({ provider: "claude" }, "auto"), "anthropic");
 });
 

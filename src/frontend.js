@@ -158,8 +158,8 @@ export function setup(ctx) {
   const connectionHint = element("div", "sce-hint"); settings.append(connectionHint);
   const effectiveMode = element("div", "sce-hint"), trackingHint = element("div", "sce-hint"); settings.append(effectiveMode, trackingHint);
   const output = control("select", advancedBody, "Structured output mode", "auto", { options: OUTPUT_OPTIONS });
-  const tokens = control("number", advancedBody, "Maximum tracker output tokens", 6144, { min: 400, max: 16384, step: 100, integer: true });
-  const timeout = control("number", advancedBody, "Tracker timeout in seconds", 120, { min: 5, max: 300, step: 5, integer: true });
+  const tokens = control("number", advancedBody, "Maximum tracker output tokens", 16384, { min: 400, max: 32768, step: 100, integer: true });
+  const timeout = control("number", advancedBody, "Tracker timeout in seconds", 300, { min: 5, max: 300, step: 5, integer: true });
   settings.append(advanced);
   let badge;
   if (native) { badge = ctx.components.mountBadge(badgeSlot, { text: "Checking", color: "neutral", size: "pill" }); mounts.push(badge); }
