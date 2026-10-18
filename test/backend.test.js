@@ -624,6 +624,66 @@ test("cleanup rechecks chat existence and deleted chats cannot recreate tracking
   await h.engine.schedule("chat", {}, "owner"); assert.ok(!h.files.has(h.engine.pathFor("chat")));
 });
 
+test("chat deletion clears the selected profile and preserves other chats and settings", async () => {
+  const h = harness(); await h.select();
+  const path = h.engine.pathFor("chat"), forkPath = h.engine.pathFor("fork");
+  const fork = { ...structuredClone(h.files.get(path)), chatId: "fork" };
+  h.files.set(forkPath, fork); h.files.set("config.json", { ...DEFAULT_CONFIG, maxTokens: 12288 });
+  h.chats.delete("chat"); h.messages.delete("chat");
+  await h.events.get("CHAT_DELETED")({ id: "chat" }, "owner");
+  assert.ok(!h.files.has(path)); assert.deepEqual(h.files.get(forkPath), fork);
+  assert.equal(h.files.get("config.json").maxTokens, 12288);
+  assert.ok(h.sent.some(entry => entry.userId === "owner" && entry.payload.type === "story_chat_deleted" && entry.payload.chatId === "chat"));
+  await h.engine.handleFrontend({ type: "story_get_status", chatId: "chat", includePrivate: true }, "owner");
+  assert.equal(h.sent.at(-1).payload.chatId, null); assert.equal(h.sent.at(-1).payload.snapshot, null);
+  await h.events.get("CHAT_SWITCHED")({ chatId: "chat" }, "owner");
+  assert.equal(h.sent.at(-1).payload.chatId, null); assert.ok(!h.files.has(path));
+  await h.events.get("CHAT_DELETED")({ chatId: "chat" }, "owner");
+  assert.ok(!h.files.has(path)); assert.deepEqual(h.files.get(forkPath), fork);
+});
+
+test("deletion removes the profile before in-flight tracking finishes and late results cannot restore it", async () => {
+  const h = harness(); await h.select(); h.addTurn("Ada nods.");
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; }), generating = new Promise(resolve => { started = resolve; });
+  h.setResponse(async () => { started(); await gate; return { content: JSON.stringify(modelOutput()) }; });
+  const tracking = h.engine.schedule("chat", {}, "owner"); await generating;
+  h.chats.delete("chat"); h.messages.delete("chat");
+  const deletion = h.events.get("CHAT_DELETED")({ id: "chat" }, "owner");
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(!h.files.has(h.engine.pathFor("chat")), "The profile must disappear while generation is still pending");
+    assert.equal(h.sent.at(-1).payload.type, "story_chat_deleted");
+  } finally { release(); await Promise.all([tracking, deletion]); }
+  assert.ok(!h.files.has(h.engine.pathFor("chat")));
+  const count = h.requests.length;
+  await h.events.get("MESSAGE_SENT")({ chatId: "chat" }, "owner");
+  assert.equal(h.requests.length, count); assert.ok(!h.files.has(h.engine.pathFor("chat")));
+  assert.equal((await h.engine.status("chat", "owner", true)).snapshot, null);
+  const restarted = createStoryEngine(h.api);
+  assert.equal((await restarted.loadStore("chat")).current, null);
+});
+
+test("chat deletion cleans up a storage write that was already in progress", async () => {
+  const h = harness(); await h.select(); h.addTurn("Ada nods.");
+  const path = h.engine.pathFor("chat"), write = h.api.storage.setJson;
+  let release, started, delayed = false, completedLateWrite = false;
+  const gate = new Promise(resolve => { release = resolve; }), writing = new Promise(resolve => { started = resolve; });
+  h.api.storage.setJson = async (target, value) => {
+    if (target === path && !delayed) { delayed = true; started(); await gate; }
+    await write(target, value);
+    if (target === path) completedLateWrite = true;
+  };
+  const tracking = h.engine.schedule("chat", {}, "owner"); await writing;
+  h.chats.delete("chat"); h.messages.delete("chat");
+  const deletion = h.events.get("CHAT_DELETED")({ id: "chat" }, "owner");
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(!h.files.has(path)); assert.equal(completedLateWrite, false);
+  } finally { release(); await Promise.all([tracking, deletion]); }
+  assert.equal(completedLateWrite, true); assert.ok(!h.files.has(path));
+});
+
 test("damaged saved state rebuilds and an edited import anchor cannot export stale imported state", async () => {
   const h = harness(); await h.select();
   h.files.get(h.engine.pathFor("chat")).current.world.time = 5;

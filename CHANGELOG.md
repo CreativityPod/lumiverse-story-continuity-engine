@@ -1,3 +1,9 @@
+# 1.7.4
+
+- Remove a deleted chat's tracking profile immediately instead of waiting for a pending tracker response. Retain a final queued cleanup for storage writes already in flight, and block later tracking and stale selection/status requests from restoring the profile.
+- Clear the selected profile, private state, setup controls, prepared exports and floating widget on chat deletion through both the host event and backend notice. Preserve other chats' tracking files and extension settings.
+- Add regressions for deletion during generation/storage writes, duplicate deletion events, late replies, restart and isolation from other chats. Older orphan files can still be removed with Clean Unused Tracking Files.
+
 # 1.7.3
 
 - Default tracker output to 16,384 tokens and allow up to 32,768 in both configuration validation and drawer controls. Default the tracker timeout to 300 seconds; preserve existing saved settings.

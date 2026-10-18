@@ -415,6 +415,7 @@ export function setup(ctx) {
     updateButtons(); requestStatus();
   }
   cleanups.push(ctx.onBackendMessage(payload => {
+    if (payload?.type === "story_chat_deleted" && payload.chatId === activeChatId) changeChat(null);
     if (payload?.type === "story_status") renderStatus(payload);
     if (payload?.type === "story_connections") {
       connectionOptions = [{ value: "", label: "Active default connection" }, ...(payload.connections ?? []).map(entry => ({ value: entry.id, label: entry.name ?? entry.id }))];
@@ -426,6 +427,7 @@ export function setup(ctx) {
     if (payload?.type === "story_action_result" && (!payload.chatId || payload.chatId === activeChatId)) { feedback.textContent = payload.message; requestStatus(); }
   }));
   cleanups.push(ctx.events.on("CHAT_SWITCHED", payload => changeChat(typeof payload?.chatId === "string" ? payload.chatId : null)));
+  cleanups.push(ctx.events.on("CHAT_DELETED", payload => { if ((payload?.id ?? payload?.chatId) === activeChatId) changeChat(null); }));
   for (const name of ["GENERATION_STARTED", "GENERATION_ENDED", "GENERATION_STOPPED"]) cleanups.push(ctx.events.on(name, payload => { if (payload?.chatId === activeChatId) { generationBusy = name === "GENERATION_STARTED"; updateButtons(); } }));
   for (const name of ["MESSAGE_SENT", "MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED"]) cleanups.push(ctx.events.on(name, payload => { if (activeChatId && payload?.chatId === activeChatId) requestStatus(); }));
   for (const name of ["CHARACTER_MESSAGE_RENDERED", "USER_MESSAGE_RENDERED"]) cleanups.push(ctx.events.on(name, payload => { if (payload?.chatId === activeChatId && payload.messageId === latestStatus?.setupTargetMessageId) renderSetupChoices(); }));

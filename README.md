@@ -1,10 +1,10 @@
 # Story Continuity Engine
 
-Persistent character and world state for any character card. Version **1.7.3** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
+Persistent character and world state for any character card. Version **1.7.4** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
 
 ## Install
 
-1. Extract `release/Story_Continuity_Engine_v1.7.3.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
+1. Extract `release/Story_Continuity_Engine_v1.7.4.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
 2. Grant **generation**, **interceptor**, **chat_mutation**, **characters**, and **chats**. These support quiet tracker calls, prompt injection, chat-variable mirrors, and card/chat reads. Grant **world_books** to include enabled constant entries from attached lorebooks and **ui_panels** for the floating widget. This extension does not modify character cards or lorebooks.
 3. Open an ordinary character chat. Choose **Import Saved Setup** or **Create From Character Card** beneath the opening message, or use the matching controls in the **Story Continuity** drawer. A new chat is recommended for the first run.
 4. Optionally select a tracker connection and structured-output mode, then select **Save Settings**. Without a selection, the host's default connection is used.
@@ -109,6 +109,8 @@ The user retains control over voluntary actions and internal state. User interna
 ## Drawer and widget
 
 The drawer uses Lumiverse native switches, selects, numeric inputs, checkbox, and badge when available; older hosts get themed HTML controls. Advanced and private sections use persistent details elements so mounted controls survive collapsing.
+
+Deleting a chat automatically removes its tracking profile, including saved state, checkpoints and diagnostics, and clears that chat from the drawer. Removal starts immediately even when tracking is still running; a final cleanup after pending work prevents an already-started storage write from restoring the file. **Clean Unused Tracking Files** can remove older leftovers, including chats deleted while the extension was not running.
 
 - **Tracking enabled**, **Show Widget**, tracker connection, output mode, output budget, timeout, **Save Settings**, and **Refresh Connections**.
 - Startup **Import Saved Setup** / **Create From Character Card** choices beneath the opening message, with matching drawer actions and running setup stages/elapsed time. Failure details remain in the drawer; inline controls show the available profile or paused status and offer **Retry Setup**. While a file picker or setup request is pending, both actions are disabled to avoid duplicate choices.

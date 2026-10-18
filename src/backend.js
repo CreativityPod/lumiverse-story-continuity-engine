@@ -43,7 +43,7 @@ export function createStoryEngine(api) {
     return snapshot;
   };
   const selection = userId => selected.get(userKey(userId));
-  function adopt(chatId, userId) { const id = typeof chatId === "string" && chatId ? chatId : null; selected.set(userKey(userId), id); if (id) users.set(id, userId); return id; }
+  function adopt(chatId, userId) { const id = typeof chatId === "string" && chatId && !deleted.has(chatId) ? chatId : null; selected.set(userKey(userId), id); if (id) users.set(id, userId); return id; }
   function requestChat(payload, userId) {
     if (payload.chatId === null) { adopt(null, userId); return null; }
     const current = selection(userId);
@@ -90,7 +90,9 @@ export function createStoryEngine(api) {
   }
   async function status(chatId, userId, includePrivate = false) {
     const config = await loadConfig();
+    if (deleted.has(chatId)) chatId = null;
     const store = chatId ? await loadStore(chatId) : null;
+    if (deleted.has(chatId)) return status(null, userId, includePrivate);
     const missing = required.filter(permission => !has(permission));
     const busy = chatId && processing.has(chatId);
     let setupProgress = store?.setupProgress && { ...store.setupProgress };
@@ -322,6 +324,7 @@ export function createStoryEngine(api) {
       await saveStore(store); await mirror(store); await publish(chatId, userId, options.includePrivate);
       if (setupRun && store.baseline) await setupStage(store, "ready", userId);
       const remaining = () => { const ms = deadline - Date.now(); if (ms < 1000) throw new Error("Reconciliation reached its time budget; completed checkpoints are saved. Reprocess to continue."); return ms; };
+      if (deleted.has(chatId)) return;
       if (!store.baseline) {
         if (store.initialWorldDefaults?.sourceFingerprint !== store.sourceFingerprint) {
           store.initialWorldDefaults = { sourceFingerprint: store.sourceFingerprint, values: createInitialWorldDefaults() };
@@ -347,6 +350,7 @@ export function createStoryEngine(api) {
       }
       let previousState = prefix.previousState ?? store.baseline;
       for (let index = prefix.count; index < turns.length; index++) {
+        if (deleted.has(chatId)) return;
         const turn = turns[index];
         const isOpening = !context.anchor && index === 0 && !turn.user && contentToText(turn.assistant.content) === store.sources.selectedOpening;
         // After generation and repair both fail, do not repeat an unchanged request
@@ -395,7 +399,26 @@ export function createStoryEngine(api) {
     next.finally(() => { if (queues.get(chatId) === next) queues.delete(chatId); }).catch(error => api.log.warn(String(error?.message ?? error)));
     return next;
   }
-  const schedule = (chatId, options = {}, userId) => { if (userId) users.set(chatId, userId); return enqueue(chatId, () => reconcile(chatId, options, userId ?? users.get(chatId))); };
+  const schedule = (chatId, options = {}, userId) => { if (!chatId || deleted.has(chatId)) return Promise.resolve(); if (userId) users.set(chatId, userId); return enqueue(chatId, () => reconcile(chatId, options, userId ?? users.get(chatId))); };
+
+  function removeDeletedChatStore(chatId, userId) {
+    if (typeof chatId !== "string" || !chatId) return;
+    deleted.add(chatId);
+    const affectedUsers = new Set();
+    if (userId) affectedUsers.add(userId);
+    for (const [key, current] of selected) if (current === chatId) {
+      selected.set(key, null); affectedUsers.add(key === "default" ? undefined : key);
+    }
+    users.delete(chatId); noticeIds.delete(chatId); generating.delete(chatId); beginning.delete(chatId);
+    for (const affected of affectedUsers) send({ type: "story_chat_deleted", chatId }, affected);
+    // Remove the saved profile immediately, even while a model request is pending.
+    // A write already awaiting storage can still finish later, so clean up again
+    // after the chat queue drains. The tombstone blocks all subsequent saves.
+    const pending = queues.has(chatId), removal = api.storage.delete(pathFor(chatId));
+    if (!pending) return removal;
+    removal.catch(error => api.log.warn(`Immediate story profile cleanup failed; retrying after pending work: ${String(error?.message ?? error)}`));
+    return enqueue(chatId, async () => { await removal.catch(() => undefined); await api.storage.delete(pathFor(chatId)); });
+  }
 
   async function intercept(messages, context) {
     const config = await loadConfig(), chatId = context?.chatId;
@@ -684,13 +707,7 @@ export function createStoryEngine(api) {
     const sourcePending = queues.get(payload.sourceChatId) ?? Promise.resolve();
     return enqueue(payload.forkedChatId, async () => { await sourcePending.catch(() => undefined); await inheritFork(payload, userId); await reconcile(payload.forkedChatId, {}, userId); });
   });
-  api.on("CHAT_DELETED", payload => {
-    const chatId = payload?.id ?? payload?.chatId;
-    if (!chatId) return;
-    deleted.add(chatId);
-    noticeIds.delete(chatId);
-    return enqueue(chatId, () => api.storage.delete(pathFor(chatId)));
-  });
+  api.on("CHAT_DELETED", (payload, userId) => removeDeletedChatStore(payload?.id ?? payload?.chatId, userId));
   api.permissions.onChanged(({ permission, granted }) => { if (permission === "interceptor" && granted) register(); });
   return { handleFrontend, schedule, reconcile, intercept, status, loadStore, pathFor, inheritFork, scanUnusedStores };
 }

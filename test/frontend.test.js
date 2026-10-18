@@ -187,6 +187,27 @@ test("chat navigation clears private display and rejects delayed setup responses
     h.status({ text: "Late chat status" }); assert.ok(!document.body.textContent.includes("Late chat status"));
   } finally { h.restore(); }
 });
+
+for (const source of ["event", "backend"]) test(`chat deletion via ${source} clears the profile, private state, widget and prepared export`, () => {
+  const h = mountHarness();
+  try {
+    h.status({ config: { showStatusWidget: true } });
+    const checkbox = document.querySelector('[aria-label="Show Private Tracker State"]');
+    checkbox.checked = true; checkbox.dispatchEvent(new window.Event("change"));
+    h.status({ privateStateIncluded: true, privateState: fixtureState(), config: { showStatusWidget: true } });
+    h.button("Export Initial Setup").click(); const request = h.sent.at(-1);
+    const remove = chatId => source === "event" ? h.events.get("CHAT_DELETED")({ id: chatId }) : h.backend({ type: "story_chat_deleted", chatId });
+    remove("other"); assert.ok(document.body.textContent.includes("Blue coat"));
+    remove("chat");
+    assert.ok(!document.body.textContent.includes("Blue coat")); assert.ok(!document.body.textContent.includes("Lantern Guild"));
+    assert.ok(h.widgets.every(widget => !widget.root.isConnected)); assert.equal(h.button("Download JSON File").hidden, true);
+    assert.equal(h.button("Export Initial Setup").disabled, true);
+    h.backend({ type: "story_setup_result", chatId: "chat", requestId: request.requestId, ok: true, fileText: "PRIVATE FILE", message: "LATE EXPORT" });
+    h.status({ text: "LATE DELETED PROFILE", privateStateIncluded: true, privateState: fixtureState() });
+    assert.ok(!document.body.textContent.includes("LATE EXPORT")); assert.ok(!document.body.textContent.includes("LATE DELETED PROFILE"));
+    assert.equal(h.button("Download JSON File").hidden, true);
+  } finally { h.restore(); }
+});
 test("cleanup sends the confirmation token returned by the scan", () => {
   const h = mountHarness();
   try {
