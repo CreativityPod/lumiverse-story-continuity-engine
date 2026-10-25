@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectRelevantState, buildRoleplayContext, lookupSourceReferences, buildRoutineTrackerContext, SOURCE_REFERENCE_CHARS, ROLEPLAY_CONTEXT_CHARS } from "../src/context.js";
+import { selectRelevantState, buildRoleplayContext, buildVisualContext, lookupSourceReferences, buildRoutineTrackerContext, SOURCE_REFERENCE_CHARS, ROLEPLAY_CONTEXT_CHARS } from "../src/context.js";
+import { renderContinuityContext } from "../src/render.js";
 import { fixtureState, character, SOURCES } from "./fixtures.js";
 import { materializeTrackerOutput, trackerStateForLlm } from "../src/schemas.js";
 
@@ -20,6 +21,27 @@ test("routine relevance omits absent NPCs and places, then restores their saved 
   assert.equal(retrieved.characters[0].id, "char:ada"); assert.equal(retrieved.characters[1].profile.privateFacts, "REMOTE_SECRET"); assert.equal(retrieved.places[1].currentState, "Lens broken"); assert.equal(retrieved.relationships.length, 1);
   assert.equal(JSON.stringify(state), before);
 });
+
+test("sublocation wording and selected character positions retrieve established place records", () => {
+  const state = extendedState(); state.world.location = "Inside the platform"; state.characters[0].visible.position = "Unknown";
+  const before = JSON.stringify(state);
+  const context = buildRoutineTrackerContext({ previousState: state, sources: SOURCES, assistantText: "Ada opens the side door." });
+  assert.deepEqual(context.state.places.map(place => place.name), ["Station"]);
+  assert.ok(context.allowedUpdateIds.places.has("place:station"));
+  assert.equal(JSON.stringify(state), before);
+  state.world.location = "Unknown"; state.characters[0].visible.position = "At the Station";
+  assert.deepEqual(selectRelevantState(state, "Ada nods.").places.map(place => place.name), ["Station"]);
+});
+
+test("ambiguous sublocations, numbered platforms and connections do not guess the current place", () => {
+  const state = fixtureState(); state.world.location = "Platform"; state.characters[0].visible.position = "Unknown";
+  state.places.push({ ...state.places[0], id: "place:second", name: "Depot", description: "Covered platform 2" });
+  assert.deepEqual(selectRelevantState(state).places, []);
+  state.world.location = "Inside platform 2";
+  assert.deepEqual(selectRelevantState(state).places.map(place => place.name), ["Depot"]);
+  state.world.location = "Town road";
+  assert.deepEqual(selectRelevantState(state).places, []);
+});
 test("same-location NPCs, user state and an explicitly focused group member receive context", () => {
   const state = extendedState(); state.characters[1].visible.position = "Station platform";
   const user = character("user", "user"); for (const field of Object.keys(user.internal)) user.internal[field] = "Unknown"; state.characters.push(user);
@@ -31,10 +53,60 @@ test("roleplay snapshot is bounded, flags omitted facts and never truncates or r
   const state = extendedState();
   for (const section of [state.characters[0].profile, state.characters[0].appearance, state.characters[0].visible, state.characters[0].internal]) for (const key of Object.keys(section)) section[key] = key.repeat(Math.floor(1500 / key.length));
   const before = JSON.stringify(state), projection = buildRoleplayContext(state, "Continue", { maxChars: 5000 });
-  assert.ok(JSON.stringify(projection).length <= 5000); assert.equal(projection.projection.omittedFields, true); assert.equal(projection.projection.omittedCharacters, 1);
+  assert.ok(renderContinuityContext(projection).length <= 5000); assert.equal(projection.projection.omittedFields, true); assert.equal(projection.projection.omittedCharacters, 1);
   assert.equal(JSON.stringify(state), before);
   for (const section of ["profile", "appearance", "visible", "internal"]) for (const [key, value] of Object.entries(projection.characters[0][section] ?? {})) assert.equal(value, state.characters[0][section][key]);
-  assert.ok(JSON.stringify(buildRoleplayContext(state)).length <= ROLEPLAY_CONTEXT_CHARS);
+  assert.ok(renderContinuityContext(buildRoleplayContext(state)).length <= ROLEPLAY_CONTEXT_CHARS);
+});
+test("labeled context preserves observable facts and keeps character secrets in explicit private sections", () => {
+  const state = fixtureState(), before = structuredClone(state);
+  state.world.date = "2031-06-12 (Summer)"; state.world.time = "21:30 (After dinner)";
+  const text = renderContinuityContext(buildRoleplayContext(state, "", { sources: SOURCES }));
+  assert.match(text, /CURRENT SCENE\nWHEN: June 12 \(Summer\); 09:30 PM \(After dinner\)/);
+  assert.equal(state.world.date, "2031-06-12 (Summer)"); assert.equal(state.world.time, "21:30 (After dinner)");
+  assert.match(text, /CHARACTER c1: Ada/);
+  assert.match(text, /STABLE APPEARANCE: FACE: Angular; EYES: Brown/);
+  assert.match(text, /CURRENT VISIBLE: HAIR & GROOMING: Black hair; DRESS & LAYERS: Blue coat/);
+  const [visible, privateText] = text.split("PRIVATE CHARACTER CONTEXT");
+  assert.ok(!visible.includes("Lantern Guild")); assert.ok(!visible.includes("Hidden tunnel"));
+  assert.match(privateText, /Lantern Guild affiliation/); assert.match(privateText, /KNOWLEDGE: Knows the signal is faulty/);
+  assert.ok(!text.includes("sourceMessageId")); assert.ok(!text.includes("char:ada")); assert.ok(!text.includes("Unknown"));
+  assert.deepEqual(state.characters, before.characters); assert.deepEqual(state.places, before.places);
+});
+test("scene context, knowledge, boundaries and commitments survive budget pressure before biography", () => {
+  const state = fixtureState(); state.world.immediateContext = "Last train departs soon";
+  state.characters[0].profile.boundaries = "Keep the locker closed";
+  state.characters[0].profile.background = "LONG_BIOGRAPHY ".repeat(100);
+  state.objectives.push({ id: "objective:train", ownerId: "char:ada", objective: "Board the last train", timing: "2031-06-12 22:00", status: "active", sourceMessageId: "card-baseline" });
+  const context = buildRoleplayContext(state, "", { maxChars: 1800 }), text = renderContinuityContext(context);
+  for (const fact of ["Last train departs soon", "Keep the locker closed", "Knows the signal is faulty", "Board the last train", "2031-06-12 22:00"]) assert.ok(text.includes(fact), fact);
+  assert.ok(!text.includes("LONG_BIOGRAPHY")); assert.ok(text.length <= 1800);
+  assert.match(text, /Omission does not erase established facts/);
+});
+test("visual text has stable image labels and excludes every private category and absent cast", () => {
+  const state = extendedState(), before = JSON.stringify(state);
+  const text = buildVisualContext(state, { sources: SOURCES });
+  for (const value of ["FACE: Angular", "EYES: Brown", "HAIR & GROOMING: Black hair", "DRESS & LAYERS: Blue coat", "POSITION: Platform", "ITEMS: Toolbag"]) assert.ok(text.includes(value), value);
+  for (const value of ["Lantern Guild", "Hidden tunnel", "Repair the signal", "Wary", "REMOTE_SECRET", "REMOTE_PLACE_SECRET", "Mira", "PRIVATE CHARACTER CONTEXT", "sourceMessageId", "char:ada"]) assert.ok(!text.includes(value), value);
+  assert.equal(JSON.stringify(state), before);
+  const known = fixtureState(); known.characters[0].visible.items = "No weapons"; known.characters[0].appearance.skin = " unknown ";
+  const rendered = buildVisualContext(known); assert.match(rendered, /ITEMS: No weapons/); assert.doesNotMatch(rendered, /SKIN:/);
+});
+
+test("visual and roleplay context include known age/gender while every other profile field remains private", () => {
+  const state = extendedState();
+  Object.assign(state.characters[0].profile, { age: "Ancient; appears to be a young adult", gender: "Woman", identity: "PRIVATE_IDENTITY_SENTINEL" });
+  Object.assign(state.characters[1].profile, { age: "Early forties", gender: "Man" });
+  const before = JSON.stringify(state), visual = buildRoleplayContext(state, "", { sources: SOURCES, visualOnly: true });
+  assert.deepEqual(visual.characters[0].profile, { age: state.characters[0].profile.age, gender: "Woman" });
+  const text = buildVisualContext(state, { sources: SOURCES });
+  assert.match(text, /AGE: Ancient; appears to be a young adult; GENDER: Woman/);
+  for (const secret of ["PRIVATE_IDENTITY_SENTINEL", "Lantern Guild", "REMOTE_SECRET", "Early forties", "PRIVATE CHARACTER CONTEXT"]) assert.ok(!text.includes(secret));
+  const roleplay = renderContinuityContext(buildRoleplayContext(state, "", { sources: SOURCES }));
+  assert.match(roleplay, /AGE: Ancient; appears to be a young adult; GENDER: Woman/);
+  assert.ok(roleplay.includes("PRIVATE_IDENTITY_SENTINEL"));
+  assert.doesNotMatch(buildVisualContext(fixtureState()), /\b(?:AGE|GENDER):/);
+  assert.equal(JSON.stringify(state), before);
 });
 test("targeted references retrieve an omitted allergy without resending guidance, examples or the opening", () => {
   const sources = structuredClone(SOURCES);
@@ -72,7 +144,7 @@ test("a scene's topic does not pull unrelated absent card characters back into t
 });
 test("focused tracker updates merge into full storage and cannot overwrite omitted entities", () => {
   const state = extendedState(), context = buildRoutineTrackerContext({ previousState: state, sources: SOURCES, userText: "Hello", assistantText: "Ada replies." });
-  assert.ok(!JSON.stringify(context.state).includes("REMOTE_SECRET")); assert.equal(context.identities.characters.length, 2);
+  assert.ok(!JSON.stringify(context.state).includes("REMOTE_SECRET"));
   const output = context.state; output.characters[0].visible.dressAndLayers = "Coat folded on bench"; output.characters[0].action = "update";
   const next = materializeTrackerOutput(output, state, "a1", context);
   assert.equal(next.characters[0].visible.dressAndLayers, "Coat folded on bench"); assert.equal(next.characters[1].profile.privateFacts, "REMOTE_SECRET"); assert.equal(next.places[1].currentState, "Lens broken");
@@ -87,7 +159,7 @@ test("large saved source and cast fixtures produce substantially smaller routine
   }
   const before = JSON.stringify(state), oldContext = JSON.stringify(sources) + JSON.stringify(trackerStateForLlm(state));
   const context = buildRoutineTrackerContext({ sources, previousState: state, userText: "Hello", assistantText: "Ada nods." });
-  const newContext = JSON.stringify({ state: context.state, references: context.references, identities: context.identities });
+  const newContext = JSON.stringify({ state: context.state, references: context.references });
   assert.ok(newContext.length < oldContext.length / 2);
   const roleplay = JSON.stringify(buildRoleplayContext(state, "Hello")); assert.ok(!roleplay.includes("UNRELATED_PRIVATE_DETAIL")); assert.ok(!roleplay.includes("REMOTE_SECRET")); assert.equal(JSON.stringify(state), before);
 });

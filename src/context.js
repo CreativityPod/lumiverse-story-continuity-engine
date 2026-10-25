@@ -1,18 +1,32 @@
 import { compactPromptState, trackerStateForLlm } from "./schemas.js";
 import { createAliasRegistry, encodeModelState } from "./aliases.js";
+import { renderContinuityContext, hasPromptValue } from "./render.js";
 
 export const ROLEPLAY_CONTEXT_CHARS = 24000;
 export const SOURCE_REFERENCE_CHARS = 6000;
 const contextNormalize = text => String(text ?? "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 const contextWords = text => new Set(contextNormalize(text).split(" ").filter(word => word.length > 2 && word !== "unknown"));
-const hasKnownValue = value => typeof value === "string" && value !== "Unknown" && Boolean(value.trim());
+const hasKnownValue = hasPromptValue;
 const phraseMentioned = (text, phrase) => { const normalized = contextNormalize(phrase); return normalized && (` ${contextNormalize(text)} `).includes(` ${normalized} `); };
+const LOCATION_STOP_WORDS = new Set("a an the at in on by near inside outside within beneath under above beside of to".split(" "));
+
+function placesAtLocation(places, location) {
+  if (!hasKnownValue(location)) return [];
+  const named = places.filter(place => phraseMentioned(location, place.name) || phraseMentioned(location, place.id));
+  if (named.length) return named;
+  // Resolve a sublocation only when its words identify one saved place. Connections
+  // and private/current facts are not evidence that the scene is at a destination.
+  const words = contextNormalize(location).split(" ").filter(word => word && word !== "unknown" && !LOCATION_STOP_WORDS.has(word));
+  if (!words.length) return [];
+  const matches = places.filter(place => words.every(word => phraseMentioned(`${place.name} ${place.description}`, word)));
+  return matches.length === 1 ? matches : [];
+}
 
 // Selection operates on committed state only; it never invents presence or changes storage.
 export function selectRelevantState(state, text = "", { focusCharacterId } = {}) {
   const focusId = state.characters.some(char => char.id === focusCharacterId) ? focusCharacterId : `char:${focusCharacterId}`;
   const focus = state.characters.find(char => char.id === focusId) ?? state.characters.find(char => char.role === "main") ?? state.characters[0];
-  const currentPlaces = state.places.filter(place => phraseMentioned(state.world.location, place.name) || phraseMentioned(state.world.location, place.id));
+  const currentPlaces = placesAtLocation(state.places, state.world.location);
   const locationWords = contextWords([state.world.location, ...currentPlaces.map(place => `${place.name} ${place.description}`)].join(" "));
   const ranked = state.characters.map((char, index) => {
     const mentioned = phraseMentioned(text, char.name) || phraseMentioned(text, char.id);
@@ -23,7 +37,8 @@ export function selectRelevantState(state, text = "", { focusCharacterId } = {})
   }).filter(entry => entry.score > 0).sort((a, b) => b.score - a.score || a.index - b.index);
   const characters = ranked.map(entry => entry.char), ids = new Set(characters.map(char => char.id));
   const relationships = state.relationships.filter(rel => ids.has(rel.fromId) && ids.has(rel.toId));
-  const places = state.places.filter(place => currentPlaces.includes(place) || phraseMentioned(text, place.name) || phraseMentioned(text, place.id));
+  const positionedPlaces = new Set(characters.flatMap(char => placesAtLocation(state.places, char.visible.position)));
+  const places = state.places.filter(place => currentPlaces.includes(place) || positionedPlaces.has(place) || phraseMentioned(text, place.name) || phraseMentioned(text, place.id));
   const objectives = state.objectives.filter(objective => ids.has(objective.ownerId) && (objective.status === "active" || phraseMentioned(text, objective.id)));
   return { schemaVersion: state.schemaVersion, world: state.world, characters, relationships, places, objectives };
 }
@@ -37,9 +52,13 @@ export function buildRoleplayContext(state, text = "", options = {}) {
   const projection = { omittedCharacters: state.characters.length - selected.characters.length,
     omittedPlaces: state.places.length - selected.places.length, omittedFields: false };
   const result = { schemaVersion: state.schemaVersion, world: {}, characters: [], relationships: [], places: [], objectives: [], projection };
-  const fits = () => JSON.stringify(result).length <= limit;
+  const visualOnly = options.visualOnly === true;
+  // Reserve the longest omission notice so a later omission cannot exceed the cap.
+  const fits = () => renderContinuityContext({ ...result, projection: {
+    omittedCharacters: state.characters.length, omittedPlaces: state.places.length, omittedFields: true,
+  } }, { visualOnly }).length <= limit;
   const add = (target, key, value) => {
-    if (value === undefined) return;
+    if (!hasKnownValue(value)) return;
     target[key] = structuredClone(value);
     if (!fits()) { delete target[key]; projection.omittedFields = true; }
   };
@@ -49,28 +68,48 @@ export function buildRoleplayContext(state, text = "", options = {}) {
     result.characters.push(record);
     if (!fits()) { result.characters.pop(); projection.omittedCharacters++; }
   }
-  for (const key of ["date", "time", "location", "sceneStatus", "weather", "proximityAndContact"]) add(result.world, key, compact.world[key]);
-  for (const record of result.characters) {
-    const char = compact.characters.find(char => char.id === record.id);
-    for (const [section, fields] of [
-      ["visible", ["position", "physicalState", "dressAndLayers", "items", "activity", "hairAndGrooming"]],
-      ["profile", ["boundaries", "relationshipContext", "identity", "personality", "preferences", "privateFacts", "background"]],
-      ["internal", ["intent", "mood", "knowledge", "concerns", "beliefs"]],
-      ["appearance", ["distinguishingFeatures", "face", "eyes", "body", "skin"]],
-    ]) {
-      record[section] = {};
+  for (const key of ["date", "time", "location", "sceneStatus", "immediateContext", "proximityAndContact", "weather"]) add(result.world, key, compact.world[key]);
+  // Fill each priority across the selected cast before spending space on history.
+  const characterFields = (section, fields) => {
+    for (const record of result.characters) {
+      const char = compact.characters.find(char => char.id === record.id);
+      record[section] ??= {};
       for (const key of fields) add(record[section], key, char[section]?.[key]);
       if (!Object.keys(record[section]).length) delete record[section];
     }
-  }
-  add(result.world, "immediateContext", compact.world.immediateContext);
-  for (const key of ["relationships", "objectives", "places"]) {
-    for (const entry of compact[key] ?? []) {
+  };
+  const records = (key, entries) => {
+    for (const entry of entries) {
       result[key].push(entry);
       if (!fits()) { result[key].pop(); projection.omittedFields = true; if (key === "places") projection.omittedPlaces++; }
     }
+  };
+  // Age/gender are the only profile fields admitted to observable text.
+  characterFields("profile", ["age", "gender"]);
+  characterFields("visible", ["position", "physicalState", "dressAndLayers", "items", "activity", "hairAndGrooming"]);
+  if (!visualOnly) {
+    characterFields("profile", ["boundaries"]);
+    characterFields("internal", ["knowledge", "beliefs", "intent"]);
+    const ids = new Set(result.characters.map(char => char.id));
+    records("relationships", (compact.relationships ?? []).filter(rel => ids.has(rel.fromId) && ids.has(rel.toId)));
+    records("objectives", (compact.objectives ?? []).filter(objective => ids.has(objective.ownerId)));
+  }
+  // Visual exports never admit private fields into their intermediate projection.
+  records("places", (compact.places ?? []).map(place => {
+    const { privateFacts, ...visible } = place;
+    return visible;
+  }));
+  characterFields("appearance", ["face", "eyes", "skin", "body", "distinguishingFeatures"]);
+  if (!visualOnly) {
+    characterFields("internal", ["mood", "concerns"]);
+    characterFields("profile", ["relationshipContext", "identity", "personality", "preferences", "privateFacts", "background"]);
+    for (const place of result.places) add(place, "privateFacts", compact.places.find(entry => entry.id === place.id)?.privateFacts);
   }
   return result;
+}
+
+export function buildVisualContext(state, options = {}) {
+  return renderContinuityContext(buildRoleplayContext(state, "", { ...options, visualOnly: true }), { visualOnly: true });
 }
 
 const REFERENCE_STOP_WORDS = new Set("the and with from that this their them they her his she him has have had are was were its into about for but not only always never very can could would should when then what who how does did says say according original card profile source please check verify remember unknown".split(" "));
@@ -79,6 +118,8 @@ const REFERENCE_TOPICS = [
   ["family", "mother", "father", "parent", "parents", "sister", "brother", "child", "children", "spouse", "married", "marriage", "divorced"],
   ["boundary", "boundaries", "privacy", "permission", "limits", "touch", "refusal", "consent", "dealbreaker", "dealbreakers"],
   ["voice", "accent", "speech", "speaks", "personality", "temperament", "habit", "habits"],
+  ["age", "aged", "years", "birthday", "young", "old", "ageless"],
+  ["gender", "woman", "man", "nonbinary"],
   ["health", "injury", "injured", "condition", "medicine", "medical", "disability", "illness"],
 ];
 const meaningfulWords = text => [...contextWords(text)].filter(word => !REFERENCE_STOP_WORDS.has(word));

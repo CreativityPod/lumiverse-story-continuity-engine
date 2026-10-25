@@ -1,11 +1,12 @@
 {
   "name": "lumiverse-story-continuity-engine",
-  "version": "1.2.0",
+  "version": "1.7.4",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.js",
+    "smoke": "node scripts/smoke-tracker.mjs",
     "check": "npm run build && npm test && node scripts/validate-package.mjs",
     "package": "npm run build && node scripts/package-release.mjs"
   },

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateState, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA, legacyTrackerState } from "../src/schemas.js";
+import { validateState, TrackerScopeError, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA, legacyTrackerState } from "../src/schemas.js";
 import { fixtureState, character, outputState } from "./fixtures.js";
 
 test("state validates and the observable projection omits all private sections", () => {
@@ -25,7 +25,29 @@ test("omitted old characters and places remain persistent", () => {
   output.characters = []; output.places = [];
   assert.deepEqual(materializeTrackerOutput(output, prior, "a1"), prior);
 });
-test("validation rejects malformed fields, lists, duplicate ids and spoofed provenance", () => {
+
+test("unchanged out-of-scope updates are harmless but all changed out-of-scope records are rejected", () => {
+  const prior = fixtureState();
+  prior.places.push({ ...prior.places[0], id: "place:remote", name: "Observatory", currentState: "Lens broken" });
+  const scope = { allowedUpdateIds: { characters: new Set(["char:ada"]), places: new Set(), relationships: new Set(), objectives: new Set() } };
+  const output = outputState(prior); output.characters[0].visible.dressAndLayers = "Coat on bench";
+  // Equivalent JSON can arrive with a different property order.
+  output.places[0] = Object.fromEntries(Object.entries(output.places[0]).reverse());
+  const next = materializeTrackerOutput(output, prior, "a1", scope);
+  assert.deepEqual(next.places, prior.places);
+  assert.equal(next.characters[0].visible.dressAndLayers, "Coat on bench");
+  assert.equal(next.characters[0].sourceMessageId, "a1");
+  output.places[0].currentState = "Door open"; output.places[1].currentState = "Lens repaired";
+  const before = JSON.stringify(prior);
+  assert.throws(() => materializeTrackerOutput(output, prior, "a2", scope), error => {
+    assert.ok(error instanceof TrackerScopeError);
+    assert.deepEqual(error.violations.map(entry => entry.id), ["place:station", "place:remote"]);
+    assert.match(error.message, /Observatory/);
+    return true;
+  });
+  assert.equal(JSON.stringify(prior), before);
+});
+test("validation rejects invalid values, duplicate ids and spoofed provenance", () => {
   const malformed = outputState(); malformed.characters[0].visible.physicalState = 42;
   assert.throws(() => materializeTrackerOutput(malformed, null, "a1"), /must be text/);
   const duplicate = outputState(); duplicate.characters.push(duplicate.characters[0]);
@@ -68,7 +90,37 @@ test("legacy v1 state migrates conservatively, preserving provenance and existin
   const current = fixtureState(), legacy = legacyTrackerState(current);
   assert.equal(legacy.schemaVersion, 1); assert.ok(!Object.hasOwn(legacy.characters[0].profile, "boundaries"));
   const before = JSON.stringify(legacy), upgraded = validateState(legacy);
-  assert.equal(upgraded.schemaVersion, 2); assert.equal(upgraded.characters[0].profile.boundaries, "Unknown"); assert.equal(upgraded.characters[0].profile.relationshipContext, "Unknown");
+  assert.equal(upgraded.schemaVersion, 3); assert.equal(upgraded.characters[0].profile.boundaries, "Unknown"); assert.equal(upgraded.characters[0].profile.relationshipContext, "Unknown");
   assert.equal(upgraded.characters[0].profile.privateFacts, current.characters[0].profile.privateFacts); assert.equal(upgraded.characters[0].sourceMessageId, "card-baseline"); assert.equal(JSON.stringify(legacy), before);
   assert.equal(publicTrackerSnapshot(upgraded).characters[0].profile, undefined);
+});
+
+test("age and gender accept descriptive text and remain an explicit public whitelist", () => {
+  for (const age of ["32", "Early thirties", "Adult; exact age unknown", "Ageless", "Ancient; appears to be a young adult", "Unknown"]) {
+    const state = fixtureState(); state.characters[0].profile.age = age; state.characters[0].profile.gender = "Nonbinary";
+    const saved = validateState(state), visible = publicTrackerSnapshot(saved), legacy = publicTrackerSnapshot(saved, { legacy: true });
+    assert.equal(visible.characters[0].age, age); assert.equal(visible.characters[0].gender, "Nonbinary");
+    assert.equal(visible.characters[0].profile, undefined); assert.ok(!JSON.stringify(visible).includes("Lantern Guild"));
+    assert.equal(legacy.characters[0].age, undefined); assert.equal(legacy.characters[0].gender, undefined);
+  }
+  const invalid = fixtureState(); invalid.characters[0].profile.age = 32;
+  assert.throws(() => validateState(invalid), /profile.age must be text/);
+});
+
+test("v2 saves upgrade without guessing age from identity or changing older macro formats", () => {
+  const current = fixtureState();
+  current.characters[0].profile.age = "Early thirties"; current.characters[0].profile.gender = "Woman";
+  current.characters[0].profile.identity = "32-year-old human woman; mechanic";
+  const v2 = legacyTrackerState(current, 2), v1 = legacyTrackerState(current), before = JSON.stringify(v2);
+  assert.equal(v2.schemaVersion, 2); assert.equal(v1.schemaVersion, 1);
+  for (const state of [v1, v2]) {
+    assert.equal(state.characters[0].profile.age, undefined); assert.equal(state.characters[0].profile.gender, undefined);
+    const migrated = validateState(state);
+    assert.equal(migrated.schemaVersion, 3); assert.equal(migrated.characters[0].profile.age, "Unknown");
+    assert.equal(migrated.characters[0].profile.gender, "Unknown");
+    assert.equal(migrated.characters[0].profile.identity, current.characters[0].profile.identity);
+    assert.equal(migrated.characters[0].sourceMessageId, current.characters[0].sourceMessageId);
+  }
+  assert.equal(JSON.stringify(v2), before); assert.deepEqual(legacyTrackerState(validateState(v2), 2), v2);
+  assert.deepEqual(legacyTrackerState(validateState(v1)), v1);
 });

@@ -9,19 +9,14 @@ assert.equal(manifest.identifier, "story_continuity_engine");
 assert.equal(manifest.name, "Story Continuity Engine");
 for (const permission of ["generation", "interceptor", "chat_mutation", "characters", "chats", "world_books", "ui_panels"]) assert.ok(manifest.permissions.includes(permission));
 const backend = await readFile(new URL(manifest.entry_backend, root), "utf8");
-const frontend = await readFile(new URL(manifest.entry_frontend, root), "utf8");
-new Script(backend, { filename: manifest.entry_backend });
-assert.ok(!/^import\s|^export\s/m.test(backend));
-assert.ok(frontend.includes("export function setup"));
-assert.ok(backend.includes("story_continuity.state_v1"));
-assert.ok(backend.includes("story_continuity.state_v2"));
-assert.ok(backend.includes("buildRoutineTrackerContext") && backend.includes("buildRoleplayContext"));
-assert.ok(backend.includes("createAliasRegistry") && backend.includes("decodeModelOutput") && backend.includes("aliasOutputSchema"));
-assert.ok(!backend.includes("use exactly char:<card id>"));
-assert.ok(!backend.includes("STABLE CARD SOURCES\\n"));
-assert.ok(!backend.includes('date_simulator.scene_v2'));
-assert.ok(frontend.includes('shortName: "Story Continuity"'));
-assert.ok(frontend.includes("mountNumericInput") && frontend.includes("mountSwitch") && frontend.includes("createFloatWidget"));
-assert.ok(!frontend.includes("mountCollapsibleSection"));
-assert.ok(backend.includes("CHAT_FORKED") && backend.includes("CHAT_DELETED"));
+// Exercise the built entry points rather than pinning internal names or prompt/UI
+// wording. Feature behavior belongs in the corresponding unit/integration tests.
+let backendHandler;
+new Script(backend, { filename: manifest.entry_backend }).runInNewContext({ spindle: {
+  permissions: { has: () => false, onChanged() {} },
+  onFrontendMessage: handler => { backendHandler = handler; }, on() {},
+} });
+assert.equal(typeof backendHandler, "function", "Built backend must register its frontend handler");
+const frontend = await import(new URL(manifest.entry_frontend, root));
+assert.equal(typeof frontend.setup, "function", "Built frontend must export setup");
 console.log("Package validation passed.");
