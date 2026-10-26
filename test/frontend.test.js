@@ -64,6 +64,28 @@ for (const native of [false, true]) test(`drawer ${native ? "native" : "fallback
   } finally { h.restore(); }
   if (native) assert.equal(h.destroyed.length, h.mounts.length);
 });
+
+for (const native of [false, true]) test(`Jev settings and unavailable saved Decision choices survive ${native ? "native" : "fallback"} controls`, () => {
+  const h = mountHarness(native);
+  try {
+    assert.ok(h.sent.some(message => message.type === "story_get_retrieval_connections"));
+    h.status({ config: { retrievalMode: "jev", retrievalConnectionId: "saved-missing" },
+      retrievalInfo: { available: false, reason: "Grant Decisions permission.", roleplay: { outcome: "fallback", reason: "Using local selection.", added: {} } } });
+    const mode = document.querySelector('[aria-label="Context retrieval"]'), connection = document.querySelector('[aria-label="Retrieval Decision connection"]');
+    assert.equal(mode.value, "jev"); assert.equal(connection.value, "saved-missing");
+    h.backend({ type: "story_retrieval_connections", connections: [{ id: "decision", name: "Jev profile" }] });
+    assert.equal(connection.value, "saved-missing");
+    connection.value = "decision"; connection.dispatchEvent(new window.Event("change"));
+    h.status({ config: { retrievalMode: "local", retrievalConnectionId: "" } });
+    assert.equal(mode.value, "jev"); assert.equal(connection.value, "decision");
+    h.button("Save Settings").click();
+    const saved = h.sent.at(-1).config;
+    assert.equal(saved.retrievalMode, "jev"); assert.equal(saved.retrievalConnectionId, "decision");
+    assert.equal(saved.connectionId, "");
+    h.button("Refresh Connections").click();
+    assert.deepEqual(h.sent.slice(-2).map(message => message.type), ["story_get_connections", "story_get_retrieval_connections"]);
+  } finally { h.restore(); }
+});
 test("drawer dates omit years and exact times show AM/PM with narrative descriptions", () => {
   const h = mountHarness();
   try {

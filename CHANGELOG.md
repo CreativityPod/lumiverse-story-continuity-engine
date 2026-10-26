@@ -1,3 +1,16 @@
+# 1.8.1
+
+- Group Tracker connection, Context retrieval and Retrieval Decision connection in a Connection settings disclosure directly below Show Widget. Start it collapsed and retain tracking warnings outside the disclosure.
+
+# 1.8.0
+
+- Add optional Jev-assisted context retrieval through Lumiverse's saved Decision connections, with a separate drawer selector and Decisions permission. Keep local selection as the default and automatic fallback.
+- Evaluate the complete saved candidate state using batched typed Score questions for main-chat context and ordinary tracking. Supplement local selections, close character dependencies and retain existing prompt budgets, validation, branch checks and visual-only mirrors.
+- Distinguish per-character knowledge, beliefs/suspicions and motivation in prompts. Retrieval does not establish presence, share private knowledge or enforce secrecy across external cards/lore/history.
+- Bound Decision work with cancellation and local deadlines; cache identical successful retrievals briefly in memory. Reject invalid/oversized requests and malformed answers without retaining provider error prose. Show outcome/count metadata in the drawer.
+- Discard pending chat injections after edits, swipes, revision/config/setup changes or deletion. Skip extra Decision work for setup, targeted repair and incomplete-field correction; preserve canonical schema 3 and existing saves/setups.
+- Advance tracker contract to 11 without replaying valid checkpoints. Add regressions for indirect family references, relationship/objective dependencies, belief ownership, fallback, cancellation, cache isolation, settings and concurrent edits.
+
 # 1.7.4
 
 - Remove a deleted chat's tracking profile immediately instead of waiting for a pending tracker response. Retain a final queued cleanup for storage writes already in flight, and block later tracking and stale selection/status requests from restoring the profile.

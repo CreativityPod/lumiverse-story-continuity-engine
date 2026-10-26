@@ -23,6 +23,7 @@ export function setup(ctx) {
   const cleanups = [], mounts = [];
   let activeChatId, latestStatus = null, showPrivate = false, disposed = false, dirty = false, widget = null, widgetButton = null;
   let connectionOptions = [{ value: "", label: "Active default connection" }], pendingSetup = null, downloadText = null, cleanupToken = null;
+  let retrievalConnectionOptions = [{ value: "", label: "Default Decision connection" }];
   let routeGeneration = 0, generationBusy = false, lastPrivateRevision = -1;
   let inlineSetup = null, startupFeedback = "", widgetConfig = null;
   let fillMissingSceneDetails = false, sceneChoiceDirty = false;
@@ -154,9 +155,19 @@ export function setup(ctx) {
     if (!value) destroyWidget(); else updateWidget(latestStatus ?? { chatId: activeChatId, config: widgetConfig, code: "loading", text: "Loading chat continuity…" });
     send({ type: "story_set_widget_visibility", showStatusWidget: value });
   });
-  const connection = control("select", settings, "Tracker connection", "", { options: connectionOptions });
-  const connectionHint = element("div", "sce-hint"); settings.append(connectionHint);
-  const effectiveMode = element("div", "sce-hint"), trackingHint = element("div", "sce-hint"); settings.append(effectiveMode, trackingHint);
+  const connectionSettings = element("details", "sce-details"), connectionBody = element("div", "sce-details-body");
+  connectionSettings.append(element("summary", "", "Connection settings"), connectionBody); settings.append(connectionSettings);
+  const connection = control("select", connectionBody, "Tracker connection", "", { options: connectionOptions });
+  const connectionHint = element("div", "sce-hint"); connectionBody.append(connectionHint);
+  const effectiveMode = element("div", "sce-hint"), trackingHint = element("div", "sce-hint"); connectionBody.append(effectiveMode);
+  const retrievalMode = control("select", connectionBody, "Context retrieval", "local", { options: [
+    { value: "local", label: "Local selection" }, { value: "jev", label: "Jev-assisted selection" }],
+    hint: "Jev can add relevant saved context for chat and tracking. Private knowledge, beliefs and motivations remain attributed to their characters. Save Settings to apply." });
+  const retrievalConnection = control("select", connectionBody, "Retrieval Decision connection", "", { options: retrievalConnectionOptions });
+  const retrievalHint = element("div", "sce-hint"), retrievalStatus = element("div", "sce-hint"); connectionBody.append(retrievalHint, retrievalStatus);
+  settings.append(trackingHint);
+  const savedRetrievalOptions = value => value && !retrievalConnectionOptions.some(entry => entry.value === value)
+    ? [...retrievalConnectionOptions, { value, label: "Unavailable saved Decision connection" }] : retrievalConnectionOptions;
   const output = control("select", advancedBody, "Structured output mode", "auto", { options: OUTPUT_OPTIONS });
   const tokens = control("number", advancedBody, "Maximum tracker output tokens", 16384, { min: 400, max: 32768, step: 100, integer: true });
   const timeout = control("number", advancedBody, "Tracker timeout in seconds", 300, { min: 5, max: 300, step: 5, integer: true });
@@ -179,8 +190,9 @@ export function setup(ctx) {
     privateText.textContent = showPrivate ? "Loading private state…" : "Private state is hidden."; requestStatus();
   }); privateBody.append(privateText, diagnosticDetails);
   const button = (root, text, action, primary = false) => { const btn = element("button", `sce-button${primary ? " sce-primary" : ""}`, text); btn.type = "button"; btn.addEventListener("click", action); root.append(btn); return btn; };
-  button(actions, "Save Settings", () => { dirty = false; send({ type: "story_save_config", config: { enabled: enabled.get(), showStatusWidget: widgetPreference.get(), connectionId: connection.get(), outputMode: output.get(), maxTokens: tokens.get(), timeoutMs: Number(timeout.get()) * 1000 } }); }, true);
-  button(actions, "Refresh Connections", () => send({ type: "story_get_connections" }));
+  button(actions, "Save Settings", () => { dirty = false; send({ type: "story_save_config", config: { enabled: enabled.get(), showStatusWidget: widgetPreference.get(), connectionId: connection.get(), outputMode: output.get(), maxTokens: tokens.get(), timeoutMs: Number(timeout.get()) * 1000,
+    retrievalMode: retrievalMode.get(), retrievalConnectionId: retrievalConnection.get() } }); }, true);
+  button(actions, "Refresh Connections", () => { send({ type: "story_get_connections" }); send({ type: "story_get_retrieval_connections" }); });
   const reprocess = button(actions, "Reprocess Latest Turn", () => { feedback.textContent = "Reprocessing latest turn…"; send({ type: "story_reprocess", includePrivate: showPrivate }); });
   const retryPartial = button(actions, "Retry Incomplete Tracking", () => { feedback.textContent = "Retrying incomplete tracking; later turns may be replayed…"; send({ type: "story_retry_partial", includePrivate: showPrivate }); });
   retryPartial.hidden = true;
@@ -363,7 +375,17 @@ export function setup(ctx) {
     revisionText.textContent = `Revision ${status.revision}${status.lastRevisionAt ? ` · Last revised ${new Date(status.lastRevisionAt).toLocaleString()}` : ""}`;
     badge.update({ text: status.processing ? "Updating" : status.code === "partial" ? "Partial" : status.code === "active" ? "Ready" : status.code === "setup" ? "Choose setup" : status.code === "idle" ? "Idle" : "Attention", color: status.level === "green" ? "success" : "warning" });
     tab.setBadge(status.level === "green" || status.code === "idle" ? null : "!");
-    if (!dirty) { enabled.set(status.config.enabled); widgetPreference.set(status.config.showStatusWidget); output.set(status.config.outputMode); tokens.set(status.config.maxTokens); timeout.set(status.config.timeoutMs / 1000); connection.options(connectionOptions); connection.set(status.config.connectionId); }
+    if (!dirty) { enabled.set(status.config.enabled); widgetPreference.set(status.config.showStatusWidget); output.set(status.config.outputMode); tokens.set(status.config.maxTokens); timeout.set(status.config.timeoutMs / 1000); connection.options(connectionOptions); connection.set(status.config.connectionId);
+      retrievalMode.set(status.config.retrievalMode ?? "local"); const savedDecision = status.config.retrievalConnectionId ?? "";
+      retrievalConnection.options(savedRetrievalOptions(savedDecision)); retrievalConnection.set(savedDecision); }
+    const retrievalInfo = status.retrievalInfo;
+    retrievalHint.textContent = status.config.retrievalMode === "jev"
+      ? retrievalInfo?.available ? "Uses the selected Decision connection; failures fall back to local selection." : retrievalInfo?.reason || "Decision availability will be checked when context is needed."
+      : "Local selection is active. Jev requires a Decision connection and the Decisions permission.";
+    retrievalStatus.textContent = [["Chat", retrievalInfo?.roleplay], ["Tracking", retrievalInfo?.tracking]].filter(([, info]) => info).map(([label, info]) => {
+      const extra = Object.values(info.added ?? {}).reduce((sum, value) => sum + value, 0);
+      return `${label}: ${info.outcome}${info.model ? ` (${info.model})` : ""}${extra ? `, ${extra} additional saved records` : ""}. ${info.reason ?? ""}`;
+    }).join(" ");
     cardNotice.hidden = !status.cardChanged;
     cardNotice.textContent = "The card changed. Use Refresh Card Profiles to rebuild continuity from the edited card and selected history.";
     previewNotice.hidden = Boolean(status.snapshot || !status.setupPreview);
@@ -421,6 +443,11 @@ export function setup(ctx) {
       connectionOptions = [{ value: "", label: "Active default connection" }, ...(payload.connections ?? []).map(entry => ({ value: entry.id, label: entry.name ?? entry.id }))];
       const current = connection.get(); connection.options(connectionOptions); connection.set(current); connectionHint.textContent = payload.error ?? "";
     }
+    if (payload?.type === "story_retrieval_connections") {
+      retrievalConnectionOptions = [{ value: "", label: "Default Decision connection" }, ...(payload.connections ?? []).map(entry => ({ value: entry.id, label: entry.name ?? entry.id }))];
+      const current = retrievalConnection.get(); retrievalConnection.options(savedRetrievalOptions(current)); retrievalConnection.set(current);
+      retrievalHint.textContent = payload.error || "Choose a Decision connection in Lumiverse, then enable Jev-assisted selection and save.";
+    }
     if (payload?.type === "story_setup_result") handleSetupResult(payload);
     if (payload?.type === "story_config_saved") { dirty = false; requestStatus(); }
     if (payload?.type === "story_cleanup_scan") { feedback.textContent = payload.message; cleanupToken = payload.count ? payload.token : null; cleanupButton.textContent = cleanupToken ? `Delete ${payload.count} Unused Files` : "Clean Unused Tracking Files"; }
@@ -435,5 +462,6 @@ export function setup(ctx) {
   ctx.ready();
   try { if (typeof ctx.getActiveChat === "function") changeChat(ctx.getActiveChat()?.chatId ?? null); else requestStatus(); } catch { requestStatus(); }
   send({ type: "story_get_connections" });
+  send({ type: "story_get_retrieval_connections" });
   return () => { disposed = true; routeGeneration++; clearSetupChoices(); destroyWidget(); for (const handle of mounts.reverse()) { try { handle.destroy(); } catch { /* host teardown */ } } for (const cleanup of cleanups.reverse()) { try { cleanup(); } catch { /* host teardown */ } } ctx.dom.cleanup(); };
 }

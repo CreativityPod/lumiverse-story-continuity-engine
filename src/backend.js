@@ -7,9 +7,10 @@ import { DEFAULT_CONFIG, normalizeConfig, runTracker, recoverSetupPreview } from
 import { TRACKER_CONTRACT_VERSION } from "./protocol.js";
 import { buildVisualContext } from "./context.js";
 import { createInitialWorldDefaults } from "./clock.js";
+import { retrieveRelevantState, decisionRetrievalAvailability, clearRetrievalCache } from "./retrieval.js";
 
 export function createStoryEngine(api) {
-  const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map();
+  const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map(), roleplayRetrieval = new Map();
   let registered = false;
   const userKey = userId => userId || "default";
   const safeToken = chatId => `${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 150)}-${fingerprint(String(chatId))}`;
@@ -130,6 +131,7 @@ export function createStoryEngine(api) {
       trackerInfo: { outputMode: store?.trackerDiagnostics?.outputMode ?? config.outputMode, provider: store?.trackerDiagnostics?.provider ?? "", model: store?.trackerDiagnostics?.model ?? "",
         lastTrackedMessageId: store?.lastTrackedMessageId ?? "", pendingMessageId: store?.rejectedTurn?.messageId || (store?.lastError ? store?.trackerDiagnostics?.sourceMessageId : "") || "", retryPaused: Boolean(store?.rejectedTurn),
         outcome: store?.trackerDiagnostics?.outcome ?? "", lastAttemptAt: store?.trackerDiagnostics?.startedAt ?? 0 },
+      retrievalInfo: { ...decisionRetrievalAvailability(api), roleplay: roleplayRetrieval.get(chatId) ?? null, tracking: store?.trackerDiagnostics?.retrieval ?? null },
       privateStateIncluded: includePrivate };
     if (includePrivate && store && !store.blocked) {
       payload.privateState = store.current; payload.setupPreviewState = !store.current && store.setupDraft ? previewForDrawer(store.setupDraft, true) : null;
@@ -357,7 +359,8 @@ export function createStoryEngine(api) {
         // on every background event. Keep the proven prefix across worker restarts.
         const signature = isOpening ? null : fingerprint({ contract: TRACKER_CONTRACT_VERSION, userId, epoch: store.epoch, sources: store.sourceFingerprint,
           previousState, turn: turn.fingerprint, focusCharacterId: turn.assistant.character_id,
-          connectionId: config.connectionId, outputMode: config.outputMode, maxTokens: config.maxTokens, timeoutMs: config.timeoutMs });
+          connectionId: config.connectionId, outputMode: config.outputMode, maxTokens: config.maxTokens, timeoutMs: config.timeoutMs,
+          retrievalMode: config.retrievalMode, retrievalConnectionId: config.retrievalConnectionId });
         if (signature && store.rejectedTurn?.signature === signature && !options.reprocess && !options.refreshCards) {
           store.lastError = store.rejectedTurn.error + rejectionRetryHint;
           await saveStore(store);
@@ -409,7 +412,8 @@ export function createStoryEngine(api) {
     for (const [key, current] of selected) if (current === chatId) {
       selected.set(key, null); affectedUsers.add(key === "default" ? undefined : key);
     }
-    users.delete(chatId); noticeIds.delete(chatId); generating.delete(chatId); beginning.delete(chatId);
+    users.delete(chatId); noticeIds.delete(chatId); generating.delete(chatId); beginning.delete(chatId); roleplayRetrieval.delete(chatId);
+    clearRetrievalCache(api);
     for (const affected of affectedUsers) send({ type: "story_chat_deleted", chatId }, affected);
     // Remove the saved profile immediately, even while a model request is pending.
     // A write already awaiting storage can still finish later, so clean up again
@@ -444,11 +448,30 @@ export function createStoryEngine(api) {
     if ((selectedContext.anchor ? `import:${selectedContext.anchor.id}` : store.epoch.startsWith("import:") ? "removed-import" : store.epoch) !== store.epoch) return clean;
     const prefix = validCheckpointPrefix(store, listEligibleTurns(selectedMessages, selectedContext));
     const latestAssistant = selectedMessages.findLast(message => message.role === "assistant" && !message.metadata?.story_continuity_setup && !isInitializationNotice(message));
-    return prefix.previousState ? injectContinuity(clean, prefix.previousState, store.lastError ? "using last valid checkpoint" : activePartialUpdates({ ...store, checkpoints: prefix.checkpoints }).length ? "partial tracking" : "active", {
-      focusCharacterId: context.characterId ?? context.targetCharacterId ?? latestAssistant?.character_id,
-      recentText: contentToText(latestAssistant?.content),
-      sources: store.sources,
-    }) : clean;
+    if (!prefix.previousState) return clean;
+    const options = { focusCharacterId: context.characterId ?? context.targetCharacterId ?? latestAssistant?.character_id,
+      recentText: contentToText(latestAssistant?.content), sources: store.sources };
+    const latestUser = clean.findLast(message => message.role === "user");
+    const retrieval = await retrieveRelevantState(api, prefix.previousState,
+      `${contentToText(latestUser?.content)}\n${options.recentText}`, config,
+      { ...options, purpose: "roleplay", userText: contentToText(latestUser?.content), assistantText: options.recentText, userId: context.userId ?? users.get(chatId) });
+    // Decisions are asynchronous. Never attach a selection from a discarded
+    // branch, deleted chat, replaced setup or changed configuration.
+    if (config.retrievalMode === "jev") {
+      if (deleted.has(chatId)) return clean;
+      const afterMessages = await api.chat.getMessages(chatId), afterStore = await loadStore(chatId), afterConfig = await loadConfig();
+      if (prefixFingerprint(afterMessages, afterMessages.length - 1) !== prefixFingerprint(selectedMessages, selectedMessages.length - 1)
+        || afterStore.revision !== store.revision || afterStore.epoch !== store.epoch || afterStore.sourceFingerprint !== store.sourceFingerprint
+        || fingerprint(afterConfig) !== fingerprint(config) || required.some(permission => !has(permission))) return clean;
+      const afterSources = await getSources(chatId, afterMessages, context.userId ?? users.get(chatId));
+      if (isSpecializedCard(afterSources.cards, afterMessages) || afterSources.sources.selectedOpening !== fresh.sources.selectedOpening) return clean;
+      // A permission can be revoked while the Decision request is in flight.
+      if (!decisionRetrievalAvailability(api).available) retrieval.retrievedIds = undefined;
+    }
+    roleplayRetrieval.set(chatId, retrieval.info);
+    while (roleplayRetrieval.size > 32) roleplayRetrieval.delete(roleplayRetrieval.keys().next().value);
+    return injectContinuity(clean, prefix.previousState, store.lastError ? "using last valid checkpoint" : activePartialUpdates({ ...store, checkpoints: prefix.checkpoints }).length ? "partial tracking" : "active",
+      { ...options, retrievedIds: retrieval.retrievedIds });
   }
   function register() { if (!registered && has("interceptor")) { api.registerInterceptor(intercept, 260); registered = true; } }
 
@@ -572,9 +595,17 @@ export function createStoryEngine(api) {
       catch (error) { send({ type: "story_connections", connections: [], error: error.message }, userId); }
       return;
     }
+    if (type === "story_get_retrieval_connections") {
+      const availability = decisionRetrievalAvailability(api);
+      try { send({ type: "story_retrieval_connections", connections: availability.available ? await api.decisions.listConnections({ userId }) : [],
+        error: availability.reason }, userId); }
+      catch { send({ type: "story_retrieval_connections", connections: [], error: "Decision connections are unavailable. Refresh after configuring a Decision connection in Lumiverse." }, userId); }
+      return;
+    }
     if (type === "story_save_config" || type === "story_set_widget_visibility") {
       const config = normalizeConfig(type === "story_save_config" ? payload.config : { ...await loadConfig(), showStatusWidget: payload.showStatusWidget });
       await api.storage.setJson("config.json", config, { indent: 2 });
+      clearRetrievalCache(api); roleplayRetrieval.clear();
       send({ type: "story_config_saved", config }, userId);
       const chatId = requestChat(payload, userId);
       if (chatId) await schedule(chatId, {}, userId); else await publish(null, userId);
@@ -708,7 +739,10 @@ export function createStoryEngine(api) {
     return enqueue(payload.forkedChatId, async () => { await sourcePending.catch(() => undefined); await inheritFork(payload, userId); await reconcile(payload.forkedChatId, {}, userId); });
   });
   api.on("CHAT_DELETED", (payload, userId) => removeDeletedChatStore(payload?.id ?? payload?.chatId, userId));
-  api.permissions.onChanged(({ permission, granted }) => { if (permission === "interceptor" && granted) register(); });
+  api.permissions.onChanged(({ permission, granted }) => {
+    if (permission === "interceptor" && granted) register();
+    if (permission === "decisions") { clearRetrievalCache(api); roleplayRetrieval.clear(); }
+  });
   return { handleFrontend, schedule, reconcile, intercept, status, loadStore, pathFor, inheritFork, scanUnusedStores };
 }
 

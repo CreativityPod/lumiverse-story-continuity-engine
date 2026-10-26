@@ -5,7 +5,7 @@ export const IDENTITY_LABELS = { age: "AGE", gender: "GENDER" };
 export const APPEARANCE_LABELS = { face: "FACE", eyes: "EYES", skin: "SKIN", body: "BODY TYPE & PROPORTIONS", distinguishingFeatures: "DISTINGUISHING FEATURES" };
 export const VISIBLE_LABELS = { hairAndGrooming: "HAIR & GROOMING", dressAndLayers: "DRESS & LAYERS", physicalState: "PHYSICAL STATE", position: "POSITION", activity: "ACTIVITY", items: "ITEMS" };
 const PROFILE_LABELS = { identity: "IDENTITY", background: "BACKGROUND", personality: "PERSONALITY & VOICE", preferences: "PREFERENCES", relationshipContext: "RELATIONSHIP HISTORY & AGREEMENTS", boundaries: "BOUNDARIES", privateFacts: "PRIVATE FACTS" };
-const INTERNAL_LABELS = { mood: "MOOD", intent: "INTENT", knowledge: "KNOWLEDGE", beliefs: "BELIEFS", concerns: "CONCERNS" };
+const INTERNAL_LABELS = { mood: "MOOD", intent: "INTENT", knowledge: "KNOWLEDGE", beliefs: "BELIEFS / SUSPICIONS", concerns: "CONCERNS" };
 export const hasPromptValue = value => typeof value === "string" && Boolean(value.trim()) && !/^unknown\.?$/i.test(value.trim());
 const promptValue = value => String(value).replace(/\r\n?/g, "\n").replace(/\n/g, "\n  ");
 const promptFields = (record, labels) => Object.entries(labels).filter(([key]) => hasPromptValue(record?.[key]))
@@ -38,7 +38,8 @@ export function renderContinuityContext(context, { visualOnly = false } = {}) {
       const profile = promptFields(char.profile, PROFILE_LABELS), internal = promptFields(char.internal, INTERNAL_LABELS);
       return profile || internal ? [`CHARACTER ${char.id}: ${promptValue(char.name)}`, ...(profile ? [`STABLE PROFILE: ${profile}`] : []), ...(internal ? [`PRIVATE STATE: ${internal}`] : [])] : [];
     });
-    if (privateCharacters.length) lines.push("", "PRIVATE CHARACTER CONTEXT — knowledge belongs to each character individually", ...privateCharacters);
+    if (privateCharacters.length) lines.push("", "PRIVATE CHARACTER CONTEXT — knowledge belongs to each character individually",
+      "Knowledge, beliefs/suspicions and motivations belong only to the named character. Beliefs may be mistaken; they are not shared knowledge or confirmed world facts. Inclusion does not establish presence, awareness or disclosure.", ...privateCharacters);
     const named = id => { const char = characters.find(char => char.id === id); return char ? `${id} (${promptValue(char.name)})` : id; };
     const arc = [];
     for (const rel of context.relationships ?? []) {

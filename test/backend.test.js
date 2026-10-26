@@ -5,7 +5,7 @@ import { DEFAULT_CONFIG } from "../src/tracker.js";
 import { formatStoryClockValue } from "../src/clock.js";
 import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns, fingerprint } from "../src/state.js";
 import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
-import { CARD, SOURCES, fixtureState, modelOutput } from "./fixtures.js";
+import { CARD, SOURCES, fixtureState, modelOutput, character } from "./fixtures.js";
 
 function harness() {
   const files = new Map(), variables = new Map(), events = new Map(), sent = [], requests = [], noticeDeletes = [];
@@ -1081,4 +1081,85 @@ test("already initialized older saves resume without a new setup decision", asyn
   await h.open();
   assert.equal((await h.engine.status("chat", "owner")).code, "active");
   assert.equal(h.requests.length, calls); assert.equal((await h.engine.loadStore("chat")).initializationMode, "create");
+});
+
+async function jevHarness() {
+  const h = harness(), decisions = [];
+  h.permissions.add("decisions"); h.api.host = { capabilities: { "decisions-v1": 1 } };
+  const answers = request => ({ model: "jev-test", answers: Object.fromEntries(Object.entries(request.questions).map(([key, question]) => {
+    const relevant = question.instructions.includes("alias n1.");
+    return [key, { type: "score", score: relevant ? 2 : 0, confidence: 1, probabilities: { "0": relevant ? 0 : 1, "1": 0, "2": relevant ? 1 : 0 } }];
+  })) });
+  h.api.decisions = { listConnections: async options => { assert.equal(options.userId, "owner"); return [{ id: "decision", name: "Jev" }]; },
+    evaluate: async request => { decisions.push(request); return answers(request); } };
+  h.files.set("config.json", { ...DEFAULT_CONFIG, retrievalMode: "jev", retrievalConnectionId: "decision" });
+  const state = fixtureState(), npc = character("npc:mira", "npc");
+  Object.assign(npc, { name: "Mira" }); npc.visible.position = "Northern observatory";
+  npc.profile.relationshipContext = "Ada's sister"; npc.internal.beliefs = "Suspects sabotage; unconfirmed";
+  state.characters.push(npc);
+  h.setResponse(async request => ({ content: JSON.stringify(modelOutput(state, { initialize: request.messages[1].content.startsWith("INITIALIZE") })) }));
+  await h.select(); assert.equal(decisions.length, 0);
+  h.setResponse(async () => ({ content: JSON.stringify(modelOutput((await h.engine.loadStore("chat")).current)) }));
+  return { ...h, decisions, answers };
+}
+
+test("Jev-assisted chat and tracking use separate exchanges and do not alter stored knowledge or image mirrors", async () => {
+  const h = await jevHarness(), before = (await h.engine.loadStore("chat")).current;
+  const outgoing = [{ role: "assistant", content: CARD.first_mes }, { role: "user", content: "What did your sister promise?" }];
+  const prompt = await h.engine.intercept(outgoing, { chatId: "chat", userId: "owner" });
+  assert.equal(h.decisions.length, 1);
+  assert.equal(h.decisions[0].state.latestUserMessage, "What did your sister promise?");
+  assert.equal(h.decisions[0].state.previousAssistantResponse, CARD.first_mes);
+  assert.match(prompt.messages.find(message => message.storyContinuityOwned).content, /Mira/);
+  assert.match(prompt.messages.find(message => message.storyContinuityOwned).content, /BELIEFS \/ SUSPICIONS: Suspects sabotage/);
+  assert.deepEqual((await h.engine.loadStore("chat")).current, before);
+  assert.ok(!h.variables.get(`chat:${CHAT_KEYS.visual}`).includes("Mira"));
+  assert.equal((await h.engine.status("chat", "owner")).retrievalInfo.roleplay.added.characters, 1);
+  h.addTurn("Ada considers her sister's promise.");
+  await h.engine.schedule("chat", {}, "owner");
+  assert.equal(h.decisions.length, 2);
+  assert.equal(h.decisions[1].state.completedUserTurn, "Continue");
+  assert.equal(h.decisions[1].state.completedAssistantTurn, "Ada considers her sister's promise.");
+  assert.equal((await h.engine.status("chat", "owner")).retrievalInfo.tracking.outcome, "selected");
+  assert.equal((await h.engine.loadStore("chat")).current.characters[0].internal.beliefs, "Unknown");
+});
+
+test("unavailable Decision connection fails locally without changing or blocking roleplay", async () => {
+  const h = await jevHarness();
+  h.api.decisions.evaluate = async () => { throw new Error("PRIVATE_DECISION_ERROR"); };
+  const prompt = await h.engine.intercept([{ role: "user", content: "What did your sister promise?" }], { chatId: "chat", userId: "owner" });
+  const content = prompt.messages.find(message => message.storyContinuityOwned).content;
+  assert.ok(!content.includes("Mira")); assert.ok(!content.includes("PRIVATE_DECISION_ERROR"));
+  const status = await h.engine.status("chat", "owner");
+  assert.equal(status.code, "active"); assert.equal(status.retrievalInfo.roleplay.outcome, "fallback");
+  assert.ok(!JSON.stringify(status).includes("PRIVATE_DECISION_ERROR"));
+});
+
+test("chat edits, swipes, revision/config changes and deletion during a Decision call discard the pending snapshot", async () => {
+  for (const mutate of [
+    h => { h.messages.get("chat")[0].content = "A different opening."; },
+    h => { h.messages.get("chat")[0].swipe_id = 1; },
+    h => { h.files.get(h.engine.pathFor("chat")).revision++; },
+    h => { h.files.set("config.json", { ...DEFAULT_CONFIG, retrievalMode: "local" }); },
+    h => h.events.get("CHAT_DELETED")({ id: "chat" }, "owner"),
+  ]) {
+    const h = await jevHarness();
+    h.api.decisions.evaluate = async request => { await mutate(h); return h.answers(request); };
+    const outgoing = [{ role: "user", content: "Ask about your sister." }];
+    const prompt = await h.engine.intercept(outgoing, { chatId: "chat", userId: "owner" });
+    assert.deepEqual(prompt, outgoing);
+  }
+});
+
+test("Decision connection listing is permission scoped and optional settings persist with widget preferences", async () => {
+  const h = await jevHarness();
+  await h.engine.handleFrontend({ type: "story_get_retrieval_connections" }, "owner");
+  assert.deepEqual(h.sent.at(-1).payload.connections, [{ id: "decision", name: "Jev" }]);
+  h.permissions.delete("decisions");
+  await h.engine.handleFrontend({ type: "story_get_retrieval_connections" }, "owner");
+  assert.deepEqual(h.sent.at(-1).payload.connections, []); assert.match(h.sent.at(-1).payload.error, /Decisions permission/);
+  await h.engine.handleFrontend({ type: "story_set_widget_visibility", chatId: "chat", showStatusWidget: false }, "owner");
+  const config = h.files.get("config.json");
+  assert.equal(config.retrievalMode, "jev"); assert.equal(config.retrievalConnectionId, "decision");
+  assert.equal((await h.engine.status("chat", "owner")).code, "active");
 });

@@ -23,7 +23,13 @@ function placesAtLocation(places, location) {
 }
 
 // Selection operates on committed state only; it never invents presence or changes storage.
-export function selectRelevantState(state, text = "", { focusCharacterId } = {}) {
+export function selectRelevantState(state, text = "", { focusCharacterId, retrievedIds } = {}) {
+  const retrieved = Object.fromEntries(["characters", "relationships", "places", "objectives"].map(kind => [kind,
+    new Set((Array.isArray(retrievedIds?.[kind]) ? retrievedIds[kind] : []).filter(id => state[kind].some(record => record.id === id)))]));
+  // A selected relationship or objective needs its saved participants/owner.
+  // Dependency inclusion retrieves context, never presence or shared knowledge.
+  for (const rel of state.relationships) if (retrieved.relationships.has(rel.id)) { retrieved.characters.add(rel.fromId); retrieved.characters.add(rel.toId); }
+  for (const objective of state.objectives) if (retrieved.objectives.has(objective.id)) retrieved.characters.add(objective.ownerId);
   const focusId = state.characters.some(char => char.id === focusCharacterId) ? focusCharacterId : `char:${focusCharacterId}`;
   const focus = state.characters.find(char => char.id === focusId) ?? state.characters.find(char => char.role === "main") ?? state.characters[0];
   const currentPlaces = placesAtLocation(state.places, state.world.location);
@@ -32,21 +38,21 @@ export function selectRelevantState(state, text = "", { focusCharacterId } = {})
     const mentioned = phraseMentioned(text, char.name) || phraseMentioned(text, char.id);
     const colocated = hasKnownValue(char.visible.position) && [...contextWords(char.visible.position)].some(word => locationWords.has(word));
     const contact = phraseMentioned(state.world.proximityAndContact, char.name);
-    const score = char.id === focus?.id ? 1000 : mentioned ? 900 : char.role === "user" ? 800 : contact ? 700 : colocated ? 600 : 0;
+    const score = char.id === focus?.id ? 1000 : mentioned ? 900 : char.role === "user" ? 800 : contact ? 700 : colocated ? 600 : retrieved.characters.has(char.id) ? 500 : 0;
     return { char, score, index };
   }).filter(entry => entry.score > 0).sort((a, b) => b.score - a.score || a.index - b.index);
   const characters = ranked.map(entry => entry.char), ids = new Set(characters.map(char => char.id));
   const relationships = state.relationships.filter(rel => ids.has(rel.fromId) && ids.has(rel.toId));
   const positionedPlaces = new Set(characters.flatMap(char => placesAtLocation(state.places, char.visible.position)));
-  const places = state.places.filter(place => currentPlaces.includes(place) || positionedPlaces.has(place) || phraseMentioned(text, place.name) || phraseMentioned(text, place.id));
-  const objectives = state.objectives.filter(objective => ids.has(objective.ownerId) && (objective.status === "active" || phraseMentioned(text, objective.id)));
+  const places = state.places.filter(place => currentPlaces.includes(place) || positionedPlaces.has(place) || phraseMentioned(text, place.name) || phraseMentioned(text, place.id) || retrieved.places.has(place.id));
+  const objectives = state.objectives.filter(objective => ids.has(objective.ownerId) && (objective.status === "active" || phraseMentioned(text, objective.id) || retrieved.objectives.has(objective.id)));
   return { schemaVersion: state.schemaVersion, world: state.world, characters, relationships, places, objectives };
 }
 
 // Whole values are admitted or omitted; neither profiles nor current state are truncated.
 // A projection is never parsed back as canonical state.
 export function buildRoleplayContext(state, text = "", options = {}) {
-  const selected = selectRelevantState(state, text, options);
+  const selected = selectRelevantState(state, text, options.visualOnly ? { ...options, retrievedIds: undefined } : options);
   const compact = encodeModelState(compactPromptState(selected), createAliasRegistry(options.sources, state));
   const limit = Math.max(1200, Math.min(64000, options.maxChars ?? ROLEPLAY_CONTEXT_CHARS));
   const projection = { omittedCharacters: state.characters.length - selected.characters.length,
