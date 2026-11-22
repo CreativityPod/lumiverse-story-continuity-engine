@@ -3,6 +3,8 @@
   "name": "Story Continuity Engine",
   "identifier": "story_continuity_engine",
   "author": "CreativityPod",
+  "github": "https://github.com/CreativityPod/lumiverse-story-continuity-engine",
+  "homepage": "https://github.com/CreativityPod/lumiverse-story-continuity-engine",
   "description": "Persistent character and world state for any character card: profiles, NPCs, internal state, clothing, physical continuity, relationships, time, weather, and places.",
   "permissions": ["generation", "interceptor", "chat_mutation", "characters", "chats", "world_books", "ui_panels", "decisions"],
   "entry_backend": "dist/backend.js",
