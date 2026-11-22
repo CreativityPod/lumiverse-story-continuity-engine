@@ -5,14 +5,16 @@ import { TRACKER_CONTRACT_VERSION, TRACKER_COLLECTIONS, TrackerValidationError, 
 import { recoverPartialTrackerOutput, scopePartialRetry, acceptedTrackerUpdates } from "./partial.js";
 import { normalizeTrackerDiagnostics } from "./diagnostics.js";
 import { createInitialWorldDefaults, normalizeInitialWorldDefaults } from "./clock.js";
+import { retrieveRelevantState } from "./retrieval.js";
 
-export const DEFAULT_CONFIG = Object.freeze({ enabled: true, showStatusWidget: true, connectionId: "", outputMode: "auto", maxTokens: 16384, timeoutMs: 300000 });
+export const DEFAULT_CONFIG = Object.freeze({ enabled: true, showStatusWidget: true, connectionId: "", outputMode: "auto", maxTokens: 16384, timeoutMs: 300000, retrievalMode: "local", retrievalConnectionId: "" });
 export const TRACKER_OUTPUT_MODES = ["auto", "openai", "openai-responses", "anthropic", "google", "plain"];
 export function normalizeConfig(value = {}) {
   const bound = (entry, fallback, min, max) => Number.isFinite(Number(entry)) ? Math.max(min, Math.min(max, Math.round(Number(entry)))) : fallback;
   return { enabled: value.enabled !== false, showStatusWidget: value.showStatusWidget !== false,
     connectionId: typeof value.connectionId === "string" ? value.connectionId : "", outputMode: TRACKER_OUTPUT_MODES.includes(value.outputMode) ? value.outputMode : "auto",
-    maxTokens: bound(value.maxTokens, DEFAULT_CONFIG.maxTokens, 400, 32768), timeoutMs: bound(value.timeoutMs, DEFAULT_CONFIG.timeoutMs, 5000, 300000) };
+    maxTokens: bound(value.maxTokens, DEFAULT_CONFIG.maxTokens, 400, 32768), timeoutMs: bound(value.timeoutMs, DEFAULT_CONFIG.timeoutMs, 5000, 300000),
+    retrievalMode: value.retrievalMode === "jev" ? "jev" : "local", retrievalConnectionId: typeof value.retrievalConnectionId === "string" ? value.retrievalConnectionId.trim() : "" };
 }
 
 export const TRACKER_SYSTEM_PROMPT = `You are the private continuity recorder for an ongoing fictional story using arbitrary character cards.
@@ -25,7 +27,7 @@ Extract profile.age and profile.gender as separate text fields, then identity (s
 After initialization, the extracted profiles in the saved state are the normal authority for stable facts. The original card is consulted through targeted reference excerpts only. Excerpts are baseline reference data, not new story events. Current canonical changes take precedence: never restore starting clothes, injuries, locations, agreements, or conditions after they changed in the story. A relevant omitted stable fact may be recorded conservatively from an excerpt; do not invent behavior or give other characters unexplained knowledge from it. Partial excerpts may lack context; preserve uncertainty. Guidance and example dialogue are not supplied as factual lookup excerpts.
 Every entity id is a backend-supplied short alias for this request. Card characters use the supplied c aliases, recurring NPCs n aliases, the user u aliases, places p aliases, relationships r aliases and objectives o aliases. Reuse the exact supplied alias and its associated name, role and controller; never invent, rename or guess ids. To add a directly established entity, use an unused creation alias from the supplied catalog (new_n1, new_u1, new_p1, new_r1 or new_o1, etc.) with action update. Declare the new character's own record before referencing its creation alias in a relationship or objective. Creation aliases are for genuinely new identities, not copies of existing characters or places. The backend assigns persistent ids. Main characters and NPCs use controller model; the user uses role user/controller user. Do not add incidental passersby. Absence does not delete an identity. Use names rather than aliases in descriptive text; aliases are bookkeeping and must not appear in narrative dialogue.
 The user controls their own character. User internal fields must all be Unknown, even if the recorder could guess them. Only record user appearance, outfit, position, belongings, and actions explicitly established by the user or direct consequences of canonical events. Do not create objectives for the user unless they stated them.
-Track each model character's mood, immediate intent, knowledge, beliefs, and concerns independently, supported by their profile and the interaction. Never give a character another's private information unless they learned it. Do not manufacture hidden plans or internal changes solely to improve the story. Record qualitative states, not numerical scores or guaranteed outcomes. Consent is action-specific, never inferred from mood, trust, clothing, attraction, physiology, or silence.
+Track each model character's mood, immediate intent, knowledge, beliefs, and concerns independently, supported by their profile and the interaction. Never give a character another's private information unless they learned it. Keep knowledge distinct from beliefs and suspicions: an uncertain or mistaken belief is not confirmed world truth. Context retrieval establishes neither awareness nor a learning event. Do not manufacture hidden plans or internal changes solely to improve the story. Record qualitative states, not numerical scores or guaranteed outcomes. Consent is action-specific, never inferred from mood, trust, clothing, attraction, physiology, or silence.
 visible contains only established observable appearance, clothing/layers, physical condition, position, activity, and items. Do not include secret affiliations, motives, thoughts, private history, or hidden knowledge in visible fields, public relationship status, place descriptions, or world context. Outside the explicit initialization policy, unknown clothing stays Unknown. Preserve item ownership, layering, injuries, contact, and positions until changed by a canonical cause.
 world.date and world.time are the fictional narrative clock, never wall-clock time. Ignore message timestamps, real response delay, and generation latency. When an exact Gregorian date including its year is established, record YYYY-MM-DD; record an exact local time as 24-hour HH:mm (include seconds only when established and relevant). Preserve approximate or partial values such as late afternoon, October 13, Day 2 or a fictional calendar; never invent a missing year, calendar, timezone, minute or second outside the explicit initialization policy. Retain established descriptions of the season or time of day alongside a supported exact value in parentheses, for example 2031-10-17 (Fall) or 14:54 (Late afternoon). A description alone remains valid when no exact date/time is known. Keep descriptions consistent as the narrative advances; never infer a season or hemisphere merely from a month, or daylight from a clock. The drawer and labeled scene text present month/day without a year and 12-hour AM/PM times; the private tracker retains calendar precision for rollovers.
 Advance narrative time by durations explicitly stated or conservatively implied by completed public dialogue and action. Ordinary conversation, walking, eating and other completed activities can consume time without a stated clock value; a small plausible advance is a supported clock change. Estimate only the portion actually completed, using its narrated scope and pace. A brief gesture or short reply can leave the displayed minute unchanged; never add a fixed minute per turn. Do not finish an in-progress activity, count its planned full duration, or introduce a time skip without narrative support. Keep approximate clocks approximate, and do not add finer precision than the saved clock supports. Use conservative estimates for implied passage rather than claiming an exact measured duration. Resolve supported elapsed durations against the saved clock, carrying midnight, month and year rollovers into world.date in the same update. For example, 2031-12-31 at 23:50 plus an explicitly elapsed 20 minutes becomes 2032-01-01 at 00:10. Preserve uncertainty when a duration or starting instant is approximate. A new date alone does not imply a new time; a new time alone must not silently reset the date. On initialization or a selected opening, record the starting clock without advancing it again. Observation, analysis and real waiting do not advance time. Weather changes only when the narrative supports it; preserve established temperature, precipitation and wind until a supported change, without inventing a forecast or off-screen weather event.
@@ -183,6 +185,7 @@ function mergeTrackerRepair(original, repaired, plan, registry, { partial = fals
 export async function runTracker(api, input, rawConfig, userId) {
   await input.onProgress?.({ stage: "generating", attempt: 1 });
   const config = normalizeConfig(rawConfig);
+  const deadline = Date.now() + Math.min(config.timeoutMs, input.remainingMs ?? config.timeoutMs);
   let connection = null;
   if (config.connectionId) {
     connection = await api.connections.get(config.connectionId, userId);
@@ -204,8 +207,11 @@ export async function runTracker(api, input, rawConfig, userId) {
     diagnostics.outcome = outcome; diagnostics.elapsedMs = Date.now() - diagnostics.startedAt;
     await input.onDiagnostic?.(normalizeTrackerDiagnostics(diagnostics));
   };
+  const retrieval = !input.initialize && !input.retryPartial ? await retrieveRelevantState(api, input.previousState,
+    `${input.userText ?? ""}\n${input.assistantText ?? ""}`, config, { ...input, userId, purpose: "tracking", timeoutMs: Math.floor(Math.max(0, deadline - Date.now()) / 4) }) : null;
+  diagnostics.retrieval = retrieval?.info ?? null;
   const routine = input.initialize ? null : input.retryPartial
-    ? { state: trackerStateForLlm(input.previousState), references: [], allowedUpdateIds: undefined } : buildRoutineTrackerContext(input);
+    ? { state: trackerStateForLlm(input.previousState), references: [], allowedUpdateIds: undefined } : buildRoutineTrackerContext({ ...input, retrievedIds: retrieval?.retrievedIds });
   const scope = { allowedUpdateIds: routine?.allowedUpdateIds };
   const registry = createAliasRegistry(input.sources, input.previousState), schema = aliasOutputSchema(registry, { ...scope, patches: true });
   const retryTargets = input.retryPartial?.issues.map(issue => ({ kind: issue.kind,
@@ -231,7 +237,7 @@ export async function runTracker(api, input, rawConfig, userId) {
   const choices = "CONTROLLED VALUES: world sceneStatus must be active or ended (active for an ongoing/opening scene; ended only when the scene explicitly ends). Objective status must be active, completed or abandoned. Never use Unknown or a description for these status fields; omit an unsupported change instead. Character role/controller come from the supplied identity.";
   const messages = [{ role: "system", content: `${TRACKER_SYSTEM_PROMPT}\n${choices}${scenePolicy ? `\n${scenePolicy}` : ""}\nRETURN SCHEMA\n${JSON.stringify(schema)}` }, { role: "user", content: `${content}${pendingGuidance}\n${catalog}${setupChecklist}` }];
   // One shared deadline covers both the original attempt and its single repair.
-  const signal = AbortSignal.timeout(Math.min(config.timeoutMs, input.remainingMs ?? config.timeoutMs));
+  const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
   const request = attempt => {
     const dto = { type: "quiet", messages: attempt, parameters: generationParameters(connection, config, schema, { useResponsesApi }), reasoning: { source: "off" }, signal };
     if (userId) dto.userId = userId;

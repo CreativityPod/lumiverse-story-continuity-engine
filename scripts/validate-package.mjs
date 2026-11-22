@@ -7,7 +7,7 @@ const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
 assert.equal(manifest.version, pkg.version);
 assert.equal(manifest.identifier, "story_continuity_engine");
 assert.equal(manifest.name, "Story Continuity Engine");
-for (const permission of ["generation", "interceptor", "chat_mutation", "characters", "chats", "world_books", "ui_panels"]) assert.ok(manifest.permissions.includes(permission));
+for (const permission of ["generation", "interceptor", "chat_mutation", "characters", "chats", "world_books", "ui_panels", "decisions"]) assert.ok(manifest.permissions.includes(permission));
 const backend = await readFile(new URL(manifest.entry_backend, root), "utf8");
 // Exercise the built entry points rather than pinning internal names or prompt/UI
 // wording. Feature behavior belongs in the corresponding unit/integration tests.
