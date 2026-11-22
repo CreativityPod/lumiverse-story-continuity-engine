@@ -1,3 +1,7 @@
+# 1.8.2
+
+- Fix the extension load error on updated Lumiverse. Create, import, and export now use the host UUID helper for setup requests, with support for older hosts over HTTP.
+
 # 1.8.1
 
 - Group Tracker connection, Context retrieval and Retrieval Decision connection in a Connection settings disclosure directly below Show Widget. Start it collapsed and retain tracking warnings outside the disclosure.

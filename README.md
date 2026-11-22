@@ -1,10 +1,10 @@
 # Story Continuity Engine
 
-Persistent character and world state for any character card. Version **1.8.1** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
+Persistent character and world state for any character card. Version **1.8.2** is a separate Lumiverse Spindle extension with its own **Story Continuity** drawer, backend storage, and `story_continuity.*` chat variables.
 
 ## Install
 
-1. Extract `release/Story_Continuity_Engine_v1.8.1.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
+1. Extract `release/Story_Continuity_Engine_v1.8.2.zip` into your Lumiverse `data/extensions` directory. The archive contains the top-level `lumiverse-story-continuity-engine/` folder with `spindle.json` and ready-to-run `dist` entries. Use Lumiverse's local extension discovery/reload workflow for that installation.
 2. Grant **generation**, **interceptor**, **chat_mutation**, **characters**, and **chats**. These support quiet tracker calls, prompt injection, chat-variable mirrors, and card/chat reads. Grant **world_books** to include enabled constant entries from attached lorebooks and **ui_panels** for the floating widget. This extension does not modify character cards or lorebooks.
 3. Open an ordinary character chat. Choose **Import Saved Setup** or **Create From Character Card** beneath the opening message, or use the matching controls in the **Story Continuity** drawer. A new chat is recommended for the first run.
 4. Optionally select a tracker connection and structured-output mode, then select **Save Settings**. Without a selection, the host's default connection is used.

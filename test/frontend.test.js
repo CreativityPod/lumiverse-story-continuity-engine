@@ -255,8 +255,10 @@ test("startup controls attach to the opening and retire without removing its sto
       assert.ok(document.getElementById(button.getAttribute("aria-describedby")));
       assert.ok(button.classList.contains("sce-primary"));
     }
+    h.ctx.uuid = { v4: () => "host-generated-request-id" };
     buttons[1].click(); buttons[1].click();
     const requests = h.sent.filter(payload => payload.type === "story_create_setup"); assert.equal(requests.length, 1);
+    assert.equal(requests[0].requestId, "host-generated-request-id");
     assert.equal(requests[0].fillMissingSceneDetails, false);
     assert.equal(requests[0].chatId, "chat"); assert.equal(buttons[0].disabled, true); assert.equal(buttons[1].disabled, true);
     showStartup(h, { code: "processing", processing: true, canCreate: false, canImport: false });
