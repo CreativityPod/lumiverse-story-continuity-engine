@@ -1,6 +1,6 @@
 import { normalizePartialUpdate, normalizeAcceptedUpdates, activePartialUpdates } from "./partial.js";
-import { validateState, publicTrackerSnapshot, remapStateSources, legacyTrackerState } from "./schemas.js";
-import { CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
+import { validateState, publicTrackerSnapshot, remapStateSources } from "./schemas.js";
+import { CHAT_KEYS, RETIRED_CHAT_KEYS, IMPORT_LOADED_TEXT, isInitializationNotice, stripInitializationNotices, cardSources, fingerprint, isSpecializedCard, contentToText,
   transcriptContext, listEligibleTurns, prefixFingerprint, createStore, normalizeStore, validCheckpointPrefix,
   validateSetupFile, importedSetupForMessage, exportInitialSetup, injectContinuity } from "./state.js";
 import { DEFAULT_CONFIG, normalizeConfig, runTracker, recoverSetupPreview } from "./tracker.js";
@@ -11,6 +11,7 @@ import { retrieveRelevantState, decisionRetrievalAvailability, clearRetrievalCac
 
 export function createStoryEngine(api) {
   const queues = new Map(), selected = new Map(), users = new Map(), processing = new Set(), deleted = new Set(), generating = new Set(), beginning = new Set(), cleanupTokens = new Map(), noticeIds = new Map(), roleplayRetrieval = new Map();
+  const cleanedMirrors = new Set();
   let registered = false;
   const userKey = userId => userId || "default";
   const safeToken = chatId => `${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 150)}-${fingerprint(String(chatId))}`;
@@ -81,12 +82,29 @@ export function createStoryEngine(api) {
   async function mirror(store) {
     if (!has("chat_mutation") || deleted.has(store.chatId)) return;
     for (const [key, value] of [[CHAT_KEYS.state, store.current && !store.blocked ? JSON.stringify(store.current) : ""],
-      [CHAT_KEYS.previousState, store.current && !store.blocked ? JSON.stringify(legacyTrackerState(store.current, 2)) : ""],
-      [CHAT_KEYS.legacyState, store.current && !store.blocked ? JSON.stringify(legacyTrackerState(store.current)) : ""],
       [CHAT_KEYS.public, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current)) : ""],
-      [CHAT_KEYS.legacyPublic, store.current && !store.blocked ? JSON.stringify(publicTrackerSnapshot(store.current, { legacy: true })) : ""],
       [CHAT_KEYS.visual, store.current && !store.blocked ? buildVisualContext(store.current, { sources: store.sources }) : ""]]) {
       if (!api.variables.chat.get || await api.variables.chat.get(store.chatId, key) !== value) await api.variables.chat.set(store.chatId, key, value);
+    }
+  }
+  async function cleanRetiredMirrors(chatId) {
+    if (cleanedMirrors.has(chatId) || deleted.has(chatId) || generating.has(chatId) || !has("chat_mutation") || !has("chats")) return;
+    const variables = api.variables.chat;
+    try {
+      if (api.host?.capabilities?.["chat-variable-history-purge-v1"] >= 1) {
+        if (!(await variables.purgeHistory(chatId, RETIRED_CHAT_KEYS))) return;
+      } else {
+        const stored = await variables.list(chatId);
+        for (const key of RETIRED_CHAT_KEYS) {
+          if (Object.hasOwn(stored, key) && !deleted.has(chatId)) await variables.delete(chatId, key);
+        }
+      }
+      if (!deleted.has(chatId)) {
+        cleanedMirrors.add(chatId);
+        if (cleanedMirrors.size > 256) cleanedMirrors.delete(cleanedMirrors.values().next().value);
+      }
+    } catch (error) {
+      api.log.warn(`Could not remove retired story continuity variables: ${String(error?.message ?? error)}`);
     }
   }
   async function status(chatId, userId, includePrivate = false) {
@@ -187,6 +205,8 @@ export function createStoryEngine(api) {
 
   async function reconcile(chatId, options = {}, userId = users.get(chatId)) {
     if (!chatId || deleted.has(chatId)) return;
+    await cleanRetiredMirrors(chatId);
+    if (deleted.has(chatId)) return;
     const config = await loadConfig();
     if (!config.enabled || required.some(permission => !has(permission))) return publish(chatId, userId, options.includePrivate);
     let store = await loadStore(chatId);
@@ -407,6 +427,7 @@ export function createStoryEngine(api) {
   function removeDeletedChatStore(chatId, userId) {
     if (typeof chatId !== "string" || !chatId) return;
     deleted.add(chatId);
+    cleanedMirrors.delete(chatId);
     const affectedUsers = new Set();
     if (userId) affectedUsers.add(userId);
     for (const [key, current] of selected) if (current === chatId) {
@@ -731,7 +752,11 @@ export function createStoryEngine(api) {
   });
   for (const name of ["GENERATION_STARTED", "GENERATION_ENDED", "GENERATION_STOPPED"]) api.on(name, payload => {
     if (!payload?.chatId) return;
-    if (name === "GENERATION_STARTED") generating.add(payload.chatId); else generating.delete(payload.chatId);
+    if (name === "GENERATION_STARTED") generating.add(payload.chatId);
+    else {
+      generating.delete(payload.chatId);
+      if (!cleanedMirrors.has(payload.chatId) && !deleted.has(payload.chatId)) return enqueue(payload.chatId, () => cleanRetiredMirrors(payload.chatId));
+    }
   });
   api.on("CHAT_FORKED", (payload, userId) => {
     if (!payload?.forkedChatId) return;

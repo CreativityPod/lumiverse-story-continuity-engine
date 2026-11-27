@@ -72,6 +72,6 @@ to take precedence. Empty or incomplete setups do not expose preview state.
 
 Both story injection and this image snapshot have a 24,000-character text budget.
 Whole field values or records may be omitted, while complete canonical JSON
-remains saved. The image budget is spent entirely on observable fields. Existing
+remains saved. The image budget is spent entirely on observable fields.
 JSON integrations can use `story_continuity.public_v2` for observable state plus
-age/gender. `story_continuity.public_v1` retains its original shape without these fields.
+age and gender.

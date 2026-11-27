@@ -3,8 +3,8 @@ import test from "node:test";
 import { createStoryEngine } from "../src/backend.js";
 import { DEFAULT_CONFIG } from "../src/tracker.js";
 import { formatStoryClockValue } from "../src/clock.js";
-import { CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns, fingerprint } from "../src/state.js";
-import { remapStateSources, legacyTrackerState } from "../src/schemas.js";
+import { CHAT_KEYS, RETIRED_CHAT_KEYS, SETUP_FORMAT, IMPORT_LOADED_TEXT, INITIALIZATION_NOTICE_TEXT, isInitializationNotice, listEligibleTurns, fingerprint } from "../src/state.js";
+import { remapStateSources } from "../src/schemas.js";
 import { CARD, SOURCES, fixtureState, modelOutput, character } from "./fixtures.js";
 
 function harness() {
@@ -18,7 +18,11 @@ function harness() {
     storage: { getJson: async (path, options) => structuredClone(files.get(path) ?? options?.fallback), setJson: async (path, value) => files.set(path, structuredClone(value)),
       list: async prefix => [...files.keys()].filter(path => path.startsWith(`${prefix}/`)).map(path => path.slice(prefix.length + 1)),
       read: async path => JSON.stringify(files.get(path)), delete: async path => files.delete(path) },
-    variables: { chat: { set: async (id, key, value) => variables.set(`${id}:${key}`, value) } },
+    variables: { chat: {
+      set: async (id, key, value) => variables.set(`${id}:${key}`, value),
+      list: async id => Object.fromEntries([...variables].filter(([key]) => key.startsWith(`${id}:`)).map(([key, value]) => [key.slice(id.length + 1), value])),
+      delete: async (id, key) => variables.delete(`${id}:${key}`),
+    } },
     chats: { get: async id => structuredClone(chats.get(id) ?? null) }, characters: { get: async id => structuredClone(cards.get(id) ?? null) },
     chat: { getMessages: async id => { if (!messages.has(id)) throw new Error("Chat not found"); return structuredClone(messages.get(id)); },
       appendMessage: async (id, message, options) => { const entry = { ...message, id: `appended-${++messageSequence}`, swipe_id: 0 }; messages.get(id).push(entry);
@@ -195,12 +199,9 @@ test("filling missing age/gender preserves scenes and known values across checkp
   assert.equal(after.revision, before.revision + 1);
   const full = JSON.parse(h.variables.get(`chat:${CHAT_KEYS.state}`));
   assert.equal(full.schemaVersion, 3); assert.equal(full.characters[0].profile.age, "Early thirties");
-  const v2 = JSON.parse(h.variables.get(`chat:${CHAT_KEYS.previousState}`));
-  assert.equal(v2.schemaVersion, 2); assert.equal(v2.characters[0].profile.age, undefined); assert.equal(v2.characters[0].profile.gender, undefined);
   const publicNow = JSON.parse(h.variables.get(`chat:${CHAT_KEYS.public}`));
   assert.equal(publicNow.characters[0].age, "Early thirties"); assert.equal(publicNow.characters[0].gender, "Woman");
   assert.equal(publicNow.characters[0].profile, undefined);
-  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.legacyPublic}`)).characters[0].age, undefined);
   assert.match(h.variables.get(`chat:${CHAT_KEYS.visual}`), /AGE: Early thirties; GENDER: Woman/);
   assert.ok(!h.variables.get(`chat:${CHAT_KEYS.visual}`).includes("Lantern Guild"));
   const restarted = createStoryEngine(h.api); await restarted.schedule("chat", {}, "owner");
@@ -209,12 +210,9 @@ test("filling missing age/gender preserves scenes and known values across checkp
   assert.equal(h.requests.length, 3); assert.equal(h.sent.at(-1).payload.ok, true);
 });
 
-test("v2 saves migrate locally and explicit identity filling survives portable setup import and forks", async () => {
+test("v3 state resumes locally and explicit identity filling survives portable setup import and forks", async () => {
   const h = harness(); await h.select();
   const path = h.engine.pathFor("chat"), saved = h.files.get(path), revision = saved.revision;
-  for (const key of ["baseline", "current"]) saved[key] = legacyTrackerState(saved[key], 2);
-  saved.initialSetup.state = legacyTrackerState(saved.initialSetup.state, 2);
-  for (const checkpoint of Object.values(saved.checkpoints)) checkpoint.state = legacyTrackerState(checkpoint.state, 2);
   const restarted = createStoryEngine(h.api); await restarted.handleFrontend({ type: "story_get_status", chatId: "chat" }, "owner");
   assert.equal(h.requests.length, 1); assert.equal((await restarted.loadStore("chat")).revision, revision);
   assert.equal((await restarted.loadStore("chat")).current.characters[0].profile.age, "Unknown");
@@ -695,25 +693,42 @@ test("damaged saved state rebuilds and an edited import anchor cannot export sta
   assert.equal(h.sent.at(-1).payload.ok, false); assert.match(h.sent.at(-1).payload.message, /anchor/);
 });
 
-test("old saved states and portable v1 setups upgrade without tracker regeneration", async () => {
+test("retired mirrors are removed from existing chats on older hosts without replay or rewriting v3", async () => {
   const h = harness(); await h.select();
-  const store = h.files.get(h.engine.pathFor("chat"));
-  store.baseline = legacyTrackerState(store.baseline); store.current = legacyTrackerState(store.current); store.initialSetup.state = legacyTrackerState(store.initialSetup.state);
-  for (const checkpoint of Object.values(store.checkpoints)) checkpoint.state = legacyTrackerState(checkpoint.state);
-  const count = h.requests.length, revision = store.revision;
+  const before = await h.engine.loadStore("chat"), count = h.requests.length;
+  assert.deepEqual(RETIRED_CHAT_KEYS, ["story_continuity.state_v1", "story_continuity.state_v2", "story_continuity.public_v1"]);
+  const expected = new Map(h.variables);
+  expected.set("chat:another_variable", "keep");
+  h.variables.set("chat:another_variable", "keep");
+  for (const key of RETIRED_CHAT_KEYS) h.variables.set(`chat:${key}`, "");
+  const restarted = createStoryEngine(h.api);
+  await restarted.schedule("chat", {}, "owner");
+  assert.equal(h.requests.length, count);
+  assert.deepEqual(await restarted.loadStore("chat"), before);
+  assert.deepEqual(h.variables, expected);
+});
+
+test("historical mirror cleanup retries when busy and preserves current mirrors", async () => {
+  const h = harness(), calls = [];
+  h.api.host = { capabilities: { "chat-variable-history-purge-v1": 1 } };
+  h.api.variables.chat.purgeHistory = async (id, keys) => {
+    calls.push([id, keys]);
+    if (calls.length === 1) return false;
+    for (const key of keys) h.variables.delete(`${id}:${key}`);
+    return true;
+  };
+  for (const key of RETIRED_CHAT_KEYS) h.variables.set(`chat:${key}`, "old");
+  await h.select();
   await h.engine.schedule("chat", {}, "owner");
-  assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).revision, revision);
-  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.state}`)).schemaVersion, 3);
-  assert.equal(JSON.parse(h.variables.get(`chat:${CHAT_KEYS.legacyState}`)).schemaVersion, 1);
-  const legacySetup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: remapStateSources(legacyTrackerState(fixtureState()), new Map(), "initial-setup") };
-  legacySetup.initialState = legacyTrackerState(legacySetup.initialState);
-  await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(legacySetup), requestId: "legacy-import" }, "owner");
-  assert.equal(h.sent.at(-1).payload.ok, true); assert.equal(h.requests.length, count); assert.equal((await h.engine.loadStore("chat")).current.schemaVersion, 3);
+  assert.deepEqual(calls, [["chat", RETIRED_CHAT_KEYS], ["chat", RETIRED_CHAT_KEYS]]);
+  assert.deepEqual([...h.variables.keys()].sort(), Object.values(CHAT_KEYS).map(key => `chat:${key}`).sort());
+  assert.equal(h.requests.length, 1);
 });
 
 test("explicit imported-profile refresh fills missing stable fields without altering recorded starting conditions", async () => {
   const h = harness(); await h.select();
-  const initial = legacyTrackerState(remapStateSources(fixtureState(), new Map(), "initial-setup"));
+  const initial = remapStateSources(fixtureState(), new Map(), "initial-setup");
+  Object.assign(initial.characters[0].profile, { relationshipContext: "Unknown", boundaries: "Unknown" });
   const setup = { format: SETUP_FORMAT, version: 1, sources: SOURCES, initialState: initial };
   await h.engine.handleFrontend({ type: "story_import_setup", chatId: "chat", fileText: JSON.stringify(setup), requestId: "import" }, "owner");
   h.setResponse(async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateState, TrackerScopeError, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA, legacyTrackerState } from "../src/schemas.js";
+import { validateState, TrackerScopeError, materializeTrackerOutput, publicTrackerSnapshot, trackerStateForLlm, remapStateSources, compactPromptState, TRACKER_OUTPUT_JSON_SCHEMA } from "../src/schemas.js";
 import { fixtureState, character, outputState } from "./fixtures.js";
 
 test("state validates and the observable projection omits all private sections", () => {
@@ -86,41 +86,21 @@ test("compact prompt retains private continuity but omits defaults and provenanc
   assert.ok(!JSON.stringify(TRACKER_OUTPUT_JSON_SCHEMA).includes('"pattern"'));
 });
 
-test("legacy v1 state migrates conservatively, preserving provenance and existing profiles", () => {
-  const current = fixtureState(), legacy = legacyTrackerState(current);
-  assert.equal(legacy.schemaVersion, 1); assert.ok(!Object.hasOwn(legacy.characters[0].profile, "boundaries"));
-  const before = JSON.stringify(legacy), upgraded = validateState(legacy);
-  assert.equal(upgraded.schemaVersion, 3); assert.equal(upgraded.characters[0].profile.boundaries, "Unknown"); assert.equal(upgraded.characters[0].profile.relationshipContext, "Unknown");
-  assert.equal(upgraded.characters[0].profile.privateFacts, current.characters[0].profile.privateFacts); assert.equal(upgraded.characters[0].sourceMessageId, "card-baseline"); assert.equal(JSON.stringify(legacy), before);
-  assert.equal(publicTrackerSnapshot(upgraded).characters[0].profile, undefined);
+test("saved state accepts schema 3 and rejects pre-v3 versions", () => {
+  const state = fixtureState();
+  assert.deepEqual(validateState(state), state);
+  for (const schemaVersion of [1, 2]) {
+    assert.throws(() => validateState({ ...state, schemaVersion }), /state.schemaVersion has an unsupported version/);
+  }
 });
 
 test("age and gender accept descriptive text and remain an explicit public whitelist", () => {
   for (const age of ["32", "Early thirties", "Adult; exact age unknown", "Ageless", "Ancient; appears to be a young adult", "Unknown"]) {
     const state = fixtureState(); state.characters[0].profile.age = age; state.characters[0].profile.gender = "Nonbinary";
-    const saved = validateState(state), visible = publicTrackerSnapshot(saved), legacy = publicTrackerSnapshot(saved, { legacy: true });
+    const saved = validateState(state), visible = publicTrackerSnapshot(saved);
     assert.equal(visible.characters[0].age, age); assert.equal(visible.characters[0].gender, "Nonbinary");
     assert.equal(visible.characters[0].profile, undefined); assert.ok(!JSON.stringify(visible).includes("Lantern Guild"));
-    assert.equal(legacy.characters[0].age, undefined); assert.equal(legacy.characters[0].gender, undefined);
   }
   const invalid = fixtureState(); invalid.characters[0].profile.age = 32;
   assert.throws(() => validateState(invalid), /profile.age must be text/);
-});
-
-test("v2 saves upgrade without guessing age from identity or changing older macro formats", () => {
-  const current = fixtureState();
-  current.characters[0].profile.age = "Early thirties"; current.characters[0].profile.gender = "Woman";
-  current.characters[0].profile.identity = "32-year-old human woman; mechanic";
-  const v2 = legacyTrackerState(current, 2), v1 = legacyTrackerState(current), before = JSON.stringify(v2);
-  assert.equal(v2.schemaVersion, 2); assert.equal(v1.schemaVersion, 1);
-  for (const state of [v1, v2]) {
-    assert.equal(state.characters[0].profile.age, undefined); assert.equal(state.characters[0].profile.gender, undefined);
-    const migrated = validateState(state);
-    assert.equal(migrated.schemaVersion, 3); assert.equal(migrated.characters[0].profile.age, "Unknown");
-    assert.equal(migrated.characters[0].profile.gender, "Unknown");
-    assert.equal(migrated.characters[0].profile.identity, current.characters[0].profile.identity);
-    assert.equal(migrated.characters[0].sourceMessageId, current.characters[0].sourceMessageId);
-  }
-  assert.equal(JSON.stringify(v2), before); assert.deepEqual(legacyTrackerState(validateState(v2), 2), v2);
-  assert.deepEqual(legacyTrackerState(validateState(v1)), v1);
 });
