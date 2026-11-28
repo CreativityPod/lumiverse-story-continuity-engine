@@ -133,24 +133,9 @@ function checkReferences(state, allowedSources) {
 }
 
 export function validateState(value, { allowedSourceMessageIds } = {}) {
-  const state = validateNode(upgradeTrackerState(value), CANONICAL_STATE_SCHEMA, "state");
+  const state = validateNode(value, CANONICAL_STATE_SCHEMA, "state");
   checkReferences(state, allowedSourceMessageIds ? new Set(allowedSourceMessageIds) : null);
   return state;
-}
-
-export function upgradeTrackerState(value) {
-  if (![1, 2].includes(value?.schemaVersion)) return value;
-  const upgraded = structuredClone(value);
-  upgraded.schemaVersion = TRACKER_SCHEMA_VERSION;
-  for (const char of upgraded.characters ?? []) if (char.profile && typeof char.profile === "object") {
-    if (value.schemaVersion === 1) {
-      if (!Object.hasOwn(char.profile, "relationshipContext")) char.profile.relationshipContext = UNKNOWN;
-      if (!Object.hasOwn(char.profile, "boundaries")) char.profile.boundaries = UNKNOWN;
-    }
-    if (!Object.hasOwn(char.profile, "age")) char.profile.age = UNKNOWN;
-    if (!Object.hasOwn(char.profile, "gender")) char.profile.gender = UNKNOWN;
-  }
-  return upgraded;
 }
 
 export class TrackerScopeError extends Error {
@@ -222,15 +207,14 @@ export function stateSourceIds(state) {
 
 export function trackerStateForLlm(state) {
   if (!state) return null;
-  state = upgradeTrackerState(state);
   const strip = section => ({ ...structuredClone(Object.fromEntries(Object.entries(section).filter(([key]) => key !== "sourceMessageId"))), action: "preserve" });
   return { schemaVersion: TRACKER_SCHEMA_VERSION, world: strip(state.world), ...Object.fromEntries(["characters", "relationships", "places", "objectives"].map(key => [key, state[key].map(strip)])) };
 }
 
-export function publicTrackerSnapshot(state, { legacy = false } = {}) {
+export function publicTrackerSnapshot(state) {
   if (!state) return null;
   const { sourceMessageId, ...world } = state.world;
-  return { world, characters: state.characters.map(char => ({ id: char.id, name: char.name, role: char.role, ...(legacy ? {} : { age: char.profile.age, gender: char.profile.gender }), appearance: char.appearance, visible: char.visible })),
+  return { world, characters: state.characters.map(char => ({ id: char.id, name: char.name, role: char.role, age: char.profile.age, gender: char.profile.gender, appearance: char.appearance, visible: char.visible })),
     relationships: state.relationships.map(rel => ({ fromId: rel.fromId, toId: rel.toId, publicStatus: rel.publicStatus })),
     places: state.places.map(place => ({ id: place.id, name: place.name, description: place.description, currentState: place.currentState, connections: place.connections })) };
 }
@@ -257,15 +241,4 @@ export function compactPromptState(state) {
     return value;
   };
   return prune(projected);
-}
-
-export function legacyTrackerState(state, version = 1) {
-  if (!state) return null;
-  const legacy = structuredClone(state);
-  legacy.schemaVersion = version;
-  for (const char of legacy.characters) {
-    delete char.profile.age; delete char.profile.gender;
-    if (version === 1) { delete char.profile.relationshipContext; delete char.profile.boundaries; }
-  }
-  return legacy;
 }

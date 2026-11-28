@@ -1,3 +1,8 @@
+# 1.8.3
+
+- Use schema 3 for saved state and setup imports. The engine still reads v1.8.2 chats and setup exports.
+- Retire the `state_v1`, `state_v2`, and `public_v1` chat variables. Opening an existing chat removes live copies. Hosts with chat variable history cleanup also remove the copies in saved swipes. Use `state_v3` for full JSON or `public_v2` for observable JSON.
+
 # 1.8.2
 
 - Fix the extension load error on updated Lumiverse. Create, import, and export now use the host UUID helper for setup requests, with support for older hosts over HTTP.
